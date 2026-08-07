@@ -1,0 +1,13 @@
+services:
+  ditch:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./downloads:/data/downloads
+      - ./data:/data/db
+    environment:
+      - PORT=3000
+      - DOWNLOADS_DIR=/data/downloads
+      - DB_PATH=/data/db/ditch.sqlite
+    restart: unless-stopped

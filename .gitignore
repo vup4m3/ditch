@@ -1,0 +1,7 @@
+node_modules/
+dist/
+downloads/
+data/
+*.sqlite
+*.sqlite-journal
+*.log

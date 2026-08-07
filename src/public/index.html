@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ditch — Live Stream Downloader</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Ditch</h1>
+    <p class="subtitle">貼上網頁網址，偵測可下載的串流</p>
+  </header>
+
+  <main>
+    <section id="detect-section">
+      <form id="detect-form">
+        <input type="url" id="page-url" placeholder="https://example.com/live" required autocomplete="off" />
+        <button type="submit" id="detect-button">偵測</button>
+      </form>
+      <p id="detect-status" class="status" hidden></p>
+    </section>
+
+    <section id="candidates-section" hidden>
+      <h2>偵測到的項目</h2>
+      <ul id="candidates-list"></ul>
+    </section>
+
+    <section id="active-downloads-section" hidden>
+      <h2>下載中</h2>
+      <ul id="active-downloads-list"></ul>
+    </section>
+
+    <section id="history-section">
+      <h2>下載紀錄</h2>
+      <table id="history-table">
+        <thead>
+          <tr>
+            <th>檔名</th>
+            <th>狀態</th>
+            <th>進度</th>
+            <th>來源</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
