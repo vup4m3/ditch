@@ -23,7 +23,20 @@ docker compose up -d
 
 預設的 `docker-compose.yml` 把 `cache`、`downloads`、`data` 都綁定到專案目錄底下的本機路徑，實際部署時請把 `downloads` 換成你要的最終目的地（可以是 NFS 掛載），`cache` 留在本機 SSD。
 
+### 設定容器執行的 UID/GID
+
+容器預設以 `1000:1000` 執行（非 root——Playwright 的 sandbox 需要非 root 才會生效），寫出的檔案會是這個 UID/GID 所有。如果 bind mount 的 host 目錄（尤其是 NFS 上的 `DOWNLOADS_DIR`）屬於別的使用者，先在專案根目錄放一個 `.env` 檔指定：
+
+```bash
+echo "PUID=$(id -u)" >> .env
+echo "PGID=$(id -g)" >> .env
+```
+
+並確保 `cache`、`downloads`、`data` 這幾個 host 目錄本身就是這組 UID/GID 可寫的（容器不會自動 `chown`，尤其 `downloads` 常指向 NFS，遞迴 chown 一個媒體庫既慢又沒必要）。細節見 [`docs/adr/0006`](docs/adr/0006-configurable-uid-gid-via-run-as-user.md)。
+
 ## 環境變數
+
+除了下面這些容器內的環境變數，`docker-compose.yml` 另外還讀取 `PUID`/`PGID`（見上一節）決定容器以哪個身分執行——這兩個不是給 Node process 用的環境變數，純粹是 compose 檔用來組出 `user:` 欄位。
 
 | 變數 | 預設值 | 說明 |
 | --- | --- | --- |

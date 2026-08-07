@@ -28,7 +28,16 @@ COPY --from=builder /app/dist ./dist
 ENV PORT=3000 \
     CACHE_DIR=/data/cache \
     DOWNLOADS_DIR=/data/downloads \
-    DB_PATH=/data/db/ditch.sqlite
+    DB_PATH=/data/db/ditch.sqlite \
+    HOME=/tmp
+
+# Run as a regular user, not root — Chromium's own sandbox refuses to initialize when the
+# process launching it is root (it would be meaningless: root can escape its own sandbox), so
+# this is also what makes Playwright's sandbox actually take effect, not just a permissions nicety.
+# 1000:1000 is the base image's own pre-existing non-root user; override at run time
+# (`docker run --user`, or `user:` in docker-compose.yml) to match whatever UID/GID owns your
+# bind-mounted volumes.
+USER 1000:1000
 
 EXPOSE 3000
 CMD ["node", "dist/server.js"]
