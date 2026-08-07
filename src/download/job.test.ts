@@ -12,7 +12,9 @@ interface RouteRequest {
   headers: IncomingMessage["headers"];
 }
 
-function startServer(routes: Record<string, (req: RouteRequest) => { status?: number; body: Buffer }>): Promise<{
+function startServer(
+  routes: Record<string, (req: RouteRequest) => { status?: number; headers?: Record<string, string>; body: Buffer }>,
+): Promise<{
   baseUrl: string;
   server: Server;
   requests: Record<string, RouteRequest[]>;
@@ -27,8 +29,8 @@ function startServer(routes: Record<string, (req: RouteRequest) => { status?: nu
       res.end();
       return;
     }
-    const { status = 200, body } = route(req);
-    res.writeHead(status);
+    const { status = 200, headers = {}, body } = route(req);
+    res.writeHead(status, headers);
     res.end(body);
   });
   return new Promise((resolve) => {
@@ -175,7 +177,7 @@ test("sends the given Referer/Cookie/User-Agent headers on every segment request
   stopServer(server);
 });
 
-test("fails the whole job when a segment fetch returns a non-2xx status", async () => {
+test("fails the whole job when a segment fetch returns a non-2xx status and there's no referer to fall back with", async () => {
   const { baseUrl, server } = await startServer({
     "/seg0.ts": () => ({ body: Buffer.from("ok") }),
     "/seg1.ts": () => ({ status: 500, body: Buffer.from("boom") }),
@@ -188,6 +190,34 @@ test("fails the whole job when a segment fetch returns a non-2xx status", async 
     ];
 
     await assert.rejects(() => downloadToFile(segments, join(dir, "out.ts"), {}));
+  });
+
+  stopServer(server);
+});
+
+test("falls back to a browser session when Node's own fetch is blocked but a referer page can warm up cookies", async () => {
+  const seg0 = Buffer.from("segment-zero-bytes");
+  const { baseUrl, server } = await startServer({
+    "/warmup": () => ({ headers: { "content-type": "text/html", "set-cookie": "cleared=1" }, body: Buffer.from("<html></html>") }),
+    "/seg0.ts": (req) => {
+      const cookie = req.headers.cookie ?? "";
+      if (!cookie.includes("cleared=1")) {
+        return { status: 403, body: Buffer.from("blocked") };
+      }
+      return { body: seg0 };
+    },
+  });
+
+  await withTempDir(async (dir) => {
+    const segments: ManifestSegment[] = [
+      { url: `${baseUrl}/seg0.ts`, durationSeconds: 1, encryption: { method: "NONE" } },
+    ];
+    const outputPath = join(dir, "out.ts");
+
+    await downloadToFile(segments, outputPath, { referer: `${baseUrl}/warmup`, userAgent: "test-agent/1.0" });
+
+    const content = await readFile(outputPath);
+    assert.deepEqual(content, seg0);
   });
 
   stopServer(server);

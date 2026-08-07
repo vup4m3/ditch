@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { classifyResponse, isManifestResponse } from "./classify.ts";
+import { DESKTOP_CHROME_USER_AGENT, STEALTH_INIT_SCRIPT } from "./stealth.ts";
 import type { Candidate } from "./types.ts";
 
 export interface DetectionResult {
@@ -83,9 +84,10 @@ export async function runDetectionSession(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const browser = await chromium.launch();
   try {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ userAgent: DESKTOP_CHROME_USER_AGENT });
     const page = await context.newPage();
     await page.addInitScript(BLOB_DETECTOR_INIT_SCRIPT);
+    await page.addInitScript(STEALTH_INIT_SCRIPT);
 
     const candidates: Candidate[] = [];
     const seenUrls = new Set<string>();
@@ -106,8 +108,8 @@ export async function runDetectionSession(
           const contentType = response.headers()["content-type"];
           const body = isManifestResponse(url, contentType) ? await response.text() : "";
           addCandidates(classifyResponse(url, contentType, body));
-        } catch {
-          // response body may be unreadable (e.g. binary data on a false-positive URL match) — ignore
+        } catch (e) {
+          console.error(`detection: failed to classify response from ${response.url()}:`, e);
         }
       })();
     });

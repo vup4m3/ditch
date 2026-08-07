@@ -1,6 +1,8 @@
 import { open, type FileHandle } from "node:fs/promises";
 import type { ManifestSegment } from "./manifest/types.ts";
 import { decryptAes128Cbc } from "./crypto.ts";
+import { createBrowserSession, type BrowserSession } from "./browserFetch.ts";
+import { DESKTOP_CHROME_USER_AGENT } from "../detection/stealth.ts";
 
 export interface DownloadRequestOptions {
   referer?: string;
@@ -39,11 +41,25 @@ export async function downloadToFile(
   const file: FileHandle = await open(outputPath, "w");
   let writtenInitSegmentUrl: string | undefined;
   const keyCache = new Map<string, Buffer>();
+  let browserSession: BrowserSession | undefined;
+
+  // Some CDNs (Cloudflare, etc.) block Node's fetch outright regardless of headers — the
+  // browser earned clearance Node has no way to replicate (ADR-0003). Falls back once a
+  // job actually needs it, then reuses the same warmed-up session for the rest of the job.
+  async function fetchWithFallback(url: string): Promise<Buffer> {
+    try {
+      return await fetchBuffer(url, headers);
+    } catch (nodeErr) {
+      if (!options.referer) throw nodeErr;
+      browserSession ??= await createBrowserSession(options.referer, options.userAgent ?? DESKTOP_CHROME_USER_AGENT);
+      return await browserSession.fetchBuffer(url);
+    }
+  }
 
   async function getKey(keyUri: string): Promise<Buffer> {
     const cached = keyCache.get(keyUri);
     if (cached) return cached;
-    const key = await fetchBuffer(keyUri, headers);
+    const key = await fetchWithFallback(keyUri);
     keyCache.set(keyUri, key);
     return key;
   }
@@ -52,12 +68,12 @@ export async function downloadToFile(
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i]!;
       if (segment.initSegmentUrl && segment.initSegmentUrl !== writtenInitSegmentUrl) {
-        const initData = await fetchBuffer(segment.initSegmentUrl, headers);
+        const initData = await fetchWithFallback(segment.initSegmentUrl);
         await file.write(initData);
         writtenInitSegmentUrl = segment.initSegmentUrl;
       }
 
-      let data = await fetchBuffer(segment.url, headers);
+      let data = await fetchWithFallback(segment.url);
       const { encryption } = segment;
       if (encryption.method === "AES-128") {
         if (!encryption.keyUri || !encryption.iv) {
@@ -74,5 +90,6 @@ export async function downloadToFile(
     }
   } finally {
     await file.close();
+    await browserSession?.close();
   }
 }

@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: amended by ADR-0004
 ---
 
 # Download Job 在 Node 端獨立發送請求，不在無頭瀏覽器分頁 context 內執行

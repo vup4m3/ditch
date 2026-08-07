@@ -2,6 +2,31 @@ import type { Candidate } from "../detection/types.ts";
 import type { ManifestSegment } from "./manifest/types.ts";
 import type { DownloadRequestOptions } from "./job.ts";
 import { parseHlsManifest } from "./manifest/hls.ts";
+import { createBrowserSession } from "./browserFetch.ts";
+import { DESKTOP_CHROME_USER_AGENT } from "../detection/stealth.ts";
+
+// Some CDNs block Node's fetch outright (Cloudflare, etc.) regardless of headers — fall back
+// to a browser session (warmed up at the original referer page) when that happens (ADR-0003).
+async function fetchManifestText(
+  url: string,
+  fetchHeaders: Record<string, string>,
+  options: DownloadRequestOptions,
+): Promise<string> {
+  const res = await fetch(url, { headers: fetchHeaders });
+  if (res.ok) {
+    return await res.text();
+  }
+  if (!options.referer) {
+    throw new Error(`failed to fetch HLS media playlist ${url}: HTTP ${res.status}`);
+  }
+  const session = await createBrowserSession(options.referer, options.userAgent ?? DESKTOP_CHROME_USER_AGENT);
+  try {
+    const buffer = await session.fetchBuffer(url);
+    return buffer.toString("utf8");
+  } finally {
+    await session.close();
+  }
+}
 
 /** Resolves a chosen Candidate into the concrete list of segments a Download Job should fetch. */
 export async function resolveSegments(candidate: Candidate, headers: DownloadRequestOptions): Promise<ManifestSegment[]> {
@@ -23,11 +48,7 @@ export async function resolveSegments(candidate: Candidate, headers: DownloadReq
   if (headers.cookie) fetchHeaders["Cookie"] = headers.cookie;
   if (headers.userAgent) fetchHeaders["User-Agent"] = headers.userAgent;
 
-  const res = await fetch(candidate.url, { headers: fetchHeaders });
-  if (!res.ok) {
-    throw new Error(`failed to fetch HLS media playlist ${candidate.url}: HTTP ${res.status}`);
-  }
-  const text = await res.text();
+  const text = await fetchManifestText(candidate.url, fetchHeaders, headers);
   const parsed = parseHlsManifest(text, candidate.url);
   if (parsed.kind !== "segments") {
     throw new Error(`expected ${candidate.url} to be an HLS media playlist, but it was a master playlist`);

@@ -15,6 +15,17 @@ function startServer(routes: Record<string, string>): Promise<{ baseUrl: string;
     res.writeHead(200, { "content-type": "application/vnd.apple.mpegurl" });
     res.end(body);
   });
+  return listen(server);
+}
+
+function startCustomServer(
+  handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void,
+): Promise<{ baseUrl: string; server: Server }> {
+  const server = createServer(handler);
+  return listen(server);
+}
+
+function listen(server: Server): Promise<{ baseUrl: string; server: Server }> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -74,6 +85,49 @@ test("an HLS candidate fetches its media playlist URL and parses the segments", 
     };
 
     const segments = await resolveSegments(candidate, {});
+
+    assert.equal(segments.length, 1);
+    assert.equal(segments[0]?.url, `${baseUrl}/hi/seg0.ts`);
+  } finally {
+    stopServer(server);
+  }
+});
+
+test("falls back to a browser session when the media playlist fetch is blocked but a referer page can warm up cookies", async () => {
+  const mediaPlaylist = `#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nseg0.ts\n#EXT-X-ENDLIST\n`;
+  const { baseUrl, server } = await startCustomServer((req, res) => {
+    if (req.url === "/warmup") {
+      res.writeHead(200, { "content-type": "text/html", "set-cookie": "cleared=1" });
+      res.end("<html></html>");
+      return;
+    }
+    if (req.url === "/hi/index.m3u8") {
+      const cookie = req.headers.cookie ?? "";
+      if (!cookie.includes("cleared=1")) {
+        res.writeHead(403);
+        res.end("blocked");
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/vnd.apple.mpegurl" });
+      res.end(mediaPlaylist);
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  try {
+    const candidate: Candidate = {
+      id: "1",
+      url: `${baseUrl}/hi/index.m3u8`,
+      type: "hls",
+      drmProtected: false,
+    };
+
+    const segments = await resolveSegments(candidate, {
+      referer: `${baseUrl}/warmup`,
+      userAgent: "test-agent/1.0",
+    });
 
     assert.equal(segments.length, 1);
     assert.equal(segments[0]?.url, `${baseUrl}/hi/seg0.ts`);
