@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm, writeFile, access } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createApp, type AppDependencies } from "./app.ts";
 import { JobStore } from "../db/jobStore.ts";
@@ -127,8 +127,11 @@ test("full happy path: detect, list candidate, download (via cache), see it comp
       assert.equal(jobs[0]?.id, jobId);
       assert.equal(jobs[0]?.status, "completed");
       assert.equal(jobs[0]?.filename, "my video.ts");
-      assert.equal(basename(jobs[0]!.outputPath), "my video.ts", "the on-disk filename should match what the user typed, not be prefixed with the job id");
-      assert.ok(jobs[0]!.outputPath.startsWith(dirs.downloadsDir), "the final file should live under downloadsDir, not cacheDir");
+      assert.equal(
+        jobs[0]!.outputPath,
+        join(dirs.downloadsDir, "my video.ts"),
+        "the final file should sit directly under downloadsDir, named exactly what the user typed — no job id anywhere",
+      );
 
       // the cache copy is cleaned up once the file has been relocated to its final destination
       await assert.rejects(access(join(dirs.cacheDir, jobId)));
@@ -137,6 +140,63 @@ test("full happy path: detect, list candidate, download (via cache), see it comp
       assert.equal(fileRes.status, 200);
       assert.equal(await fileRes.text(), "fake-video-bytes");
       assert.match(fileRes.headers.get("content-disposition") ?? "", /filename="my video\.ts"/);
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("rejects a download request that would overwrite an existing file with 409, unless overwrite is set", async () => {
+  await withTempDirs(async (dirs) => {
+    let attempt = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          attempt++;
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, `bytes-from-attempt-${attempt}`);
+        },
+      }),
+    );
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const firstRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "dup.ts" }),
+      });
+      assert.equal(firstRes.status, 202);
+      const { id: firstJobId } = (await firstRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/downloads/${firstJobId}/events`, 3);
+
+      const conflictRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "dup.ts" }),
+      });
+      assert.equal(conflictRes.status, 409);
+      assert.equal((await conflictRes.json()).filename, "dup.ts");
+
+      const jobsAfterConflict = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as unknown[];
+      assert.equal(jobsAfterConflict.length, 1, "a rejected conflict must not create a job");
+
+      const overwriteRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "dup.ts", overwrite: true }),
+      });
+      assert.equal(overwriteRes.status, 202);
+      const { id: secondJobId } = (await overwriteRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/downloads/${secondJobId}/events`, 3);
+
+      assert.equal(await readFile(join(dirs.downloadsDir, "dup.ts"), "utf8"), "bytes-from-attempt-2");
     } finally {
       await close();
     }

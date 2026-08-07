@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
 import { randomUUID } from "node:crypto";
 import { join, basename } from "node:path";
-import { stat, mkdir, rm } from "node:fs/promises";
+import { stat, access, mkdir, rm } from "node:fs/promises";
 import { SseChannel } from "./sseChannel.ts";
 import { JobStore } from "../db/jobStore.ts";
 import type { Candidate } from "../detection/types.ts";
@@ -36,6 +36,15 @@ interface DetectionEntry {
 function sanitizeFilename(name: string): string {
   const base = basename(name).trim();
   return base.length > 0 ? base : "download";
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createApp(deps: AppDependencies): Express {
@@ -85,8 +94,8 @@ export function createApp(deps: AppDependencies): Express {
     entry.channel.subscribe(res);
   });
 
-  app.post("/api/downloads", (req, res) => {
-    const { detectionId, candidateId, filename } = req.body ?? {};
+  app.post("/api/downloads", async (req, res) => {
+    const { detectionId, candidateId, filename, overwrite } = req.body ?? {};
     const entry = detectionId ? detections.get(detectionId) : undefined;
     const candidate = entry?.candidates.find((c) => c.id === candidateId);
     if (!entry || !candidate) {
@@ -98,6 +107,13 @@ export function createApp(deps: AppDependencies): Express {
       return;
     }
 
+    const sanitizedFilename = sanitizeFilename(typeof filename === "string" && filename ? filename : "download");
+    const finalPath = join(deps.downloadsDir, sanitizedFilename);
+    if (!overwrite && (await pathExists(finalPath))) {
+      res.status(409).json({ error: "filename_conflict", filename: sanitizedFilename });
+      return;
+    }
+
     const headers: DownloadRequestOptions = {
       referer: entry.result?.referer,
       cookie: entry.result?.cookie,
@@ -106,7 +122,7 @@ export function createApp(deps: AppDependencies): Express {
     const job = deps.jobStore.create({
       sourcePageUrl: entry.result?.referer ?? "",
       candidateUrl: candidate.url,
-      filename: sanitizeFilename(typeof filename === "string" && filename ? filename : "download"),
+      filename: sanitizedFilename,
     });
     const channel = new SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>();
     downloadChannels.set(job.id, channel);
@@ -114,7 +130,6 @@ export function createApp(deps: AppDependencies): Express {
 
     const cacheJobDir = join(deps.cacheDir, job.id);
     const cachePath = join(cacheJobDir, job.filename);
-    const finalPath = join(deps.downloadsDir, job.id, job.filename);
     (async () => {
       await mkdir(cacheJobDir, { recursive: true });
       const segments = await deps.resolveSegments(candidate, headers);
@@ -126,7 +141,7 @@ export function createApp(deps: AppDependencies): Express {
 
       deps.jobStore.markMoving(job.id);
       channel.publish({ type: "moving", data: {} });
-      await mkdir(join(deps.downloadsDir, job.id), { recursive: true });
+      await mkdir(deps.downloadsDir, { recursive: true });
       await deps.relocateFile(cachePath, finalPath);
       await rm(cacheJobDir, { recursive: true, force: true });
 

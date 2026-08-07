@@ -145,13 +145,20 @@ function renderActiveDownload(jobId, filename) {
   return { row: li, fill, label };
 }
 
-async function startDownload(candidate, filename) {
+async function startDownload(candidate, filename, overwrite = false) {
   if (!currentDetectionId) return;
   const res = await fetch("/api/downloads", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ detectionId: currentDetectionId, candidateId: candidate.id, filename }),
+    body: JSON.stringify({ detectionId: currentDetectionId, candidateId: candidate.id, filename, overwrite }),
   });
+  if (res.status === 409) {
+    const { filename: conflictFilename } = await res.json();
+    if (confirm(`已有名為「${conflictFilename}」的檔案，要覆蓋嗎？`)) {
+      await startDownload(candidate, filename, true);
+    }
+    return;
+  }
   if (!res.ok) {
     setDetectStatus(`建立下載任務失敗 (HTTP ${res.status})`, true);
     return;
