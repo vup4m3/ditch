@@ -5,3 +5,5 @@ data/
 *.sqlite
 *.sqlite-journal
 *.log
+docs/research/
+docs/agents/
