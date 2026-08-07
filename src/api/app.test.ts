@@ -1,20 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createApp, type AppDependencies } from "./app.ts";
 import { JobStore } from "../db/jobStore.ts";
+import { relocateFile } from "../download/relocateFile.ts";
 import type { Candidate } from "../detection/types.ts";
 
-async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "ditch-app-test-"));
+interface TestDirs {
+  cacheDir: string;
+  downloadsDir: string;
+}
+
+async function withTempDirs<T>(fn: (dirs: TestDirs) => Promise<T>): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), "ditch-app-test-"));
   try {
-    return await fn(dir);
+    return await fn({ cacheDir: join(root, "cache"), downloadsDir: join(root, "downloads") });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 }
 
@@ -65,10 +71,11 @@ const CANDIDATE: Candidate = {
   drmProtected: false,
 };
 
-function makeDeps(downloadsDir: string, overrides: Partial<AppDependencies> = {}): AppDependencies {
+function makeDeps({ cacheDir, downloadsDir }: TestDirs, overrides: Partial<AppDependencies> = {}): AppDependencies {
   const jobStore = new JobStore(new DatabaseSync(":memory:"));
   return {
     jobStore,
+    cacheDir,
     downloadsDir,
     runDetection: async (pageUrl, onCandidate) => {
       onCandidate(CANDIDATE);
@@ -79,13 +86,14 @@ function makeDeps(downloadsDir: string, overrides: Partial<AppDependencies> = {}
       onProgress?.({ completedSegments: 1, totalSegments: 1 });
       await writeFile(outputPath, "fake-video-bytes");
     },
+    relocateFile,
     ...overrides,
   };
 }
 
-test("full happy path: detect, list candidate, download, see it complete, fetch the file", async () => {
-  await withTempDir(async (downloadsDir) => {
-    const { baseUrl, close } = await startApp(makeDeps(downloadsDir));
+test("full happy path: detect, list candidate, download (via cache), see it complete, fetch the file", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
     try {
       const detectRes = await fetch(`${baseUrl}/api/detections`, {
         method: "POST",
@@ -108,20 +116,27 @@ test("full happy path: detect, list candidate, download, see it complete, fetch 
       assert.equal(downloadRes.status, 202);
       const { id: jobId } = (await downloadRes.json()) as { id: string };
 
-      const downloadEvents = await readSse(baseUrl, `/api/downloads/${jobId}/events`, 2);
+      const downloadEvents = await readSse(baseUrl, `/api/downloads/${jobId}/events`, 3);
       assert.equal(downloadEvents[0]?.type, "progress");
-      assert.equal(downloadEvents[1]?.type, "done");
+      assert.equal(downloadEvents[1]?.type, "moving");
+      assert.equal(downloadEvents[2]?.type, "done");
 
       const listRes = await fetch(`${baseUrl}/api/downloads`);
-      const jobs = (await listRes.json()) as Array<{ id: string; status: string; filename: string }>;
+      const jobs = (await listRes.json()) as Array<{ id: string; status: string; filename: string; outputPath: string }>;
       assert.equal(jobs.length, 1);
       assert.equal(jobs[0]?.id, jobId);
       assert.equal(jobs[0]?.status, "completed");
       assert.equal(jobs[0]?.filename, "my video.ts");
+      assert.equal(basename(jobs[0]!.outputPath), "my video.ts", "the on-disk filename should match what the user typed, not be prefixed with the job id");
+      assert.ok(jobs[0]!.outputPath.startsWith(dirs.downloadsDir), "the final file should live under downloadsDir, not cacheDir");
+
+      // the cache copy is cleaned up once the file has been relocated to its final destination
+      await assert.rejects(access(join(dirs.cacheDir, jobId)));
 
       const fileRes = await fetch(`${baseUrl}/api/downloads/${jobId}/file`);
       assert.equal(fileRes.status, 200);
       assert.equal(await fileRes.text(), "fake-video-bytes");
+      assert.match(fileRes.headers.get("content-disposition") ?? "", /filename="my video\.ts"/);
     } finally {
       await close();
     }
@@ -129,10 +144,10 @@ test("full happy path: detect, list candidate, download, see it complete, fetch 
 });
 
 test("rejects a download request for a DRM-protected candidate with 422", async () => {
-  await withTempDir(async (downloadsDir) => {
+  await withTempDirs(async (dirs) => {
     const drmCandidate: Candidate = { ...CANDIDATE, id: "candidate-drm", drmProtected: true };
     const { baseUrl, close } = await startApp(
-      makeDeps(downloadsDir, {
+      makeDeps(dirs, {
         runDetection: async (pageUrl, onCandidate) => {
           onCandidate(drmCandidate);
           return { candidates: [drmCandidate], referer: pageUrl, userAgent: "fake-agent/1.0", pageTitle: "Example Live Stream" };
@@ -161,9 +176,9 @@ test("rejects a download request for a DRM-protected candidate with 422", async 
 });
 
 test("marks the job as failed and emits an error event when the download throws", async () => {
-  await withTempDir(async (downloadsDir) => {
+  await withTempDirs(async (dirs) => {
     const { baseUrl, close } = await startApp(
-      makeDeps(downloadsDir, {
+      makeDeps(dirs, {
         downloadToFile: async () => {
           throw new Error("network exploded");
         },

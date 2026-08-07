@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
 import { randomUUID } from "node:crypto";
 import { join, basename } from "node:path";
-import { stat } from "node:fs/promises";
+import { stat, mkdir, rm } from "node:fs/promises";
 import { SseChannel } from "./sseChannel.ts";
 import { JobStore } from "../db/jobStore.ts";
 import type { Candidate } from "../detection/types.ts";
@@ -11,6 +11,9 @@ import type { DownloadProgress, DownloadRequestOptions } from "../download/job.t
 
 export interface AppDependencies {
   jobStore: JobStore;
+  /** Fast local scratch space (e.g. an SSD) that segments are downloaded into first. */
+  cacheDir: string;
+  /** Final resting place for completed downloads (e.g. an NFS mount) — may be slow/high-latency. */
   downloadsDir: string;
   runDetection: (pageUrl: string, onCandidate: (candidate: Candidate) => void) => Promise<DetectionResult>;
   resolveSegments: (candidate: Candidate, headers: DownloadRequestOptions) => Promise<ManifestSegment[]>;
@@ -20,6 +23,8 @@ export interface AppDependencies {
     options: DownloadRequestOptions,
     onProgress?: (progress: DownloadProgress) => void,
   ) => Promise<void>;
+  /** Moves the completed file from the cache into its final destination (see ADR-0005). */
+  relocateFile: (sourcePath: string, destPath: string) => Promise<void>;
 }
 
 interface DetectionEntry {
@@ -38,7 +43,7 @@ export function createApp(deps: AppDependencies): Express {
   app.use(express.json());
 
   const detections = new Map<string, DetectionEntry>();
-  const downloadChannels = new Map<string, SseChannel<{ type: "progress" | "done" | "error"; data: unknown }>>();
+  const downloadChannels = new Map<string, SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>>();
 
   app.post("/api/detections", (req, res) => {
     const pageUrl = req.body?.pageUrl;
@@ -103,20 +108,30 @@ export function createApp(deps: AppDependencies): Express {
       candidateUrl: candidate.url,
       filename: sanitizeFilename(typeof filename === "string" && filename ? filename : "download"),
     });
-    const channel = new SseChannel<{ type: "progress" | "done" | "error"; data: unknown }>();
+    const channel = new SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>();
     downloadChannels.set(job.id, channel);
     res.status(202).json({ id: job.id });
 
-    const outputPath = join(deps.downloadsDir, `${job.id}-${job.filename}`);
+    const cacheJobDir = join(deps.cacheDir, job.id);
+    const cachePath = join(cacheJobDir, job.filename);
+    const finalPath = join(deps.downloadsDir, job.id, job.filename);
     (async () => {
+      await mkdir(cacheJobDir, { recursive: true });
       const segments = await deps.resolveSegments(candidate, headers);
-      await deps.downloadToFile(segments, outputPath, headers, (progress) => {
+      await deps.downloadToFile(segments, cachePath, headers, (progress) => {
         const fraction = progress.totalSegments > 0 ? progress.completedSegments / progress.totalSegments : 0;
         deps.jobStore.updateProgress(job.id, fraction);
         channel.publish({ type: "progress", data: progress });
       });
-      deps.jobStore.markCompleted(job.id, outputPath);
-      channel.publish({ type: "done", data: { outputPath } });
+
+      deps.jobStore.markMoving(job.id);
+      channel.publish({ type: "moving", data: {} });
+      await mkdir(join(deps.downloadsDir, job.id), { recursive: true });
+      await deps.relocateFile(cachePath, finalPath);
+      await rm(cacheJobDir, { recursive: true, force: true });
+
+      deps.jobStore.markCompleted(job.id, finalPath);
+      channel.publish({ type: "done", data: { outputPath: finalPath } });
       channel.close();
     })().catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);

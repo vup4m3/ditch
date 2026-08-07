@@ -1,4 +1,4 @@
-export type JobStatus = "pending" | "downloading" | "completed" | "failed";
+export type JobStatus = "pending" | "downloading" | "moving" | "completed" | "failed";
 
 export interface DownloadJobRecord {
   id: string;

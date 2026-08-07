@@ -86,6 +86,13 @@ export class JobStore {
       .run(progress, new Date().toISOString(), id);
   }
 
+  /** Called once the file is fully written to cache and is being relocated to its final destination. */
+  markMoving(id: string): void {
+    this.#db
+      .prepare(`UPDATE download_jobs SET status = 'moving', updatedAt = ? WHERE id = ?`)
+      .run(new Date().toISOString(), id);
+  }
+
   markCompleted(id: string, outputPath: string): void {
     this.#db
       .prepare(
@@ -111,7 +118,7 @@ export class JobStore {
   failAllInProgress(errorMessage: string): void {
     this.#db
       .prepare(
-        `UPDATE download_jobs SET status = 'failed', errorMessage = ?, updatedAt = ? WHERE status IN ('pending', 'downloading')`,
+        `UPDATE download_jobs SET status = 'failed', errorMessage = ?, updatedAt = ? WHERE status IN ('pending', 'downloading', 'moving')`,
       )
       .run(errorMessage, new Date().toISOString());
   }

@@ -60,6 +60,21 @@ test("updateProgress() moves status to downloading and records progress", () => 
   assert.equal(fetched.progress, 0.42);
 });
 
+test("markMoving() sets status to moving", () => {
+  const store = makeStore();
+  const created = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+  });
+  store.updateProgress(created.id, 1);
+
+  store.markMoving(created.id);
+  const fetched = store.get(created.id)!;
+
+  assert.equal(fetched.status, "moving");
+});
+
 test("markCompleted() sets status completed, progress 1, and the output path", () => {
   const store = makeStore();
   const created = store.create({
@@ -111,7 +126,7 @@ test("list() returns jobs most-recently-created first", () => {
   assert.equal(jobs[1]!.id, first.id);
 });
 
-test("failAllInProgress() marks pending and downloading jobs as failed, leaving completed/failed jobs untouched", () => {
+test("failAllInProgress() marks pending, downloading, and moving jobs as failed, leaving completed/failed jobs untouched", () => {
   const store = makeStore();
   const pending = store.create({
     sourcePageUrl: "https://example.com/a",
@@ -124,6 +139,12 @@ test("failAllInProgress() marks pending and downloading jobs as failed, leaving 
     filename: "b.ts",
   });
   store.updateProgress(downloading.id, 0.5);
+  const moving = store.create({
+    sourcePageUrl: "https://example.com/d",
+    candidateUrl: "https://example.com/d.m3u8",
+    filename: "d.ts",
+  });
+  store.markMoving(moving.id);
   const completed = store.create({
     sourcePageUrl: "https://example.com/c",
     candidateUrl: "https://example.com/c.m3u8",
@@ -136,5 +157,6 @@ test("failAllInProgress() marks pending and downloading jobs as failed, leaving 
   assert.equal(store.get(pending.id)!.status, "failed");
   assert.equal(store.get(pending.id)!.errorMessage, "interrupted by server restart");
   assert.equal(store.get(downloading.id)!.status, "failed");
+  assert.equal(store.get(moving.id)!.status, "failed");
   assert.equal(store.get(completed.id)!.status, "completed");
 });

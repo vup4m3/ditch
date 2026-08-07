@@ -26,6 +26,7 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 
 ENV PORT=3000 \
+    CACHE_DIR=/data/cache \
     DOWNLOADS_DIR=/data/downloads \
     DB_PATH=/data/db/ditch.sqlite
 

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 downloads/
+cache/
 data/
 *.sqlite
 *.sqlite-journal

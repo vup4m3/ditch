@@ -142,7 +142,7 @@ function renderActiveDownload(jobId, filename) {
 
   activeDownloadsSection.hidden = false;
   activeDownloadsList.appendChild(li);
-  return { row: li, fill };
+  return { row: li, fill, label };
 }
 
 async function startDownload(candidate, filename) {
@@ -157,13 +157,17 @@ async function startDownload(candidate, filename) {
     return;
   }
   const { id: jobId } = await res.json();
-  const { row, fill } = renderActiveDownload(jobId, filename);
+  const { row, fill, label } = renderActiveDownload(jobId, filename);
 
   const source = new EventSource(`/api/downloads/${jobId}/events`);
   source.addEventListener("progress", (e) => {
     const data = JSON.parse(e.data);
     const pct = data.totalSegments > 0 ? Math.round((data.completedSegments / data.totalSegments) * 100) : 0;
     fill.style.width = `${pct}%`;
+  });
+  source.addEventListener("moving", () => {
+    fill.style.width = "100%";
+    label.textContent = `${filename}（搬移到目的地中…）`;
   });
   source.addEventListener("done", () => {
     fill.style.width = "100%";
@@ -179,7 +183,7 @@ async function startDownload(candidate, filename) {
 }
 
 function statusLabel(status) {
-  return { pending: "等待中", downloading: "下載中", completed: "已完成", failed: "失敗" }[status] || status;
+  return { pending: "等待中", downloading: "下載中", moving: "搬移到目的地中", completed: "已完成", failed: "失敗" }[status] || status;
 }
 
 async function loadHistory() {
