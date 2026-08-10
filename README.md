@@ -14,6 +14,30 @@ A live-stream downloader that runs as a web server: paste a page URL, the server
 
 ## Quick Start (Docker)
 
+### Using the prebuilt image
+
+No need to clone the repo — a `docker-compose.yml` referencing the published image is enough:
+
+```yaml
+services:
+  ditch:
+    image: ghcr.io/vup4m3/ditch:latest
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./cache:/data/cache
+      - ./downloads:/data/downloads
+      - ./data:/data/db
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+```
+
+### Building from source
+
 ```bash
 git clone git@github.com:vup4m3/ditch.git
 cd ditch
@@ -23,11 +47,11 @@ docker compose up -d
 
 Open `http://localhost:3000` and paste a page URL to get started.
 
-The default `docker-compose.yml` binds `cache`, `downloads`, and `data` to local paths under the project directory. For an actual deployment, point `downloads` at your real final destination (which can be an NFS mount), and keep `cache` on a local SSD.
+The default `docker-compose.yml` (and the snippet above) binds `cache`, `downloads`, and `data` to local paths under the project directory. For an actual deployment, point `downloads` at your real final destination (which can be an NFS mount), and keep `cache` on a local SSD.
 
 ### Configuring the container's UID/GID
 
-The container runs as `1000:1000` by default (non-root — Playwright's sandbox requires non-root to take effect), so files it writes will be owned by that UID/GID. If the bind-mounted host directory (especially `DOWNLOADS_DIR` on NFS) belongs to a different user, create a `.env` file in the project root beforehand to specify:
+The container runs as `1000:1000` by default (non-root — Playwright's sandbox requires non-root to take effect), so files it writes will be owned by that UID/GID. If the bind-mounted host directory (especially `DOWNLOADS_DIR` on NFS) belongs to a different user, create a `.env` file next to your `docker-compose.yml` beforehand to specify:
 
 ```bash
 echo "PUID=$(id -u)" >> .env

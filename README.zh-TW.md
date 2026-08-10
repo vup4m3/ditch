@@ -14,6 +14,30 @@
 
 ## 快速開始（Docker）
 
+### 用現成的 image
+
+不用 clone 整個 repo，準備一個引用已發布 image 的 `docker-compose.yml` 就夠了：
+
+```yaml
+services:
+  ditch:
+    image: ghcr.io/vup4m3/ditch:latest
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./cache:/data/cache
+      - ./downloads:/data/downloads
+      - ./data:/data/db
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+```
+
+### 從原始碼建置
+
 ```bash
 git clone git@github.com:vup4m3/ditch.git
 cd ditch
@@ -23,11 +47,11 @@ docker compose up -d
 
 開啟 `http://localhost:3000`，貼上網頁網址即可開始使用。
 
-預設的 `docker-compose.yml` 把 `cache`、`downloads`、`data` 都綁定到專案目錄底下的本機路徑，實際部署時請把 `downloads` 換成你要的最終目的地（可以是 NFS 掛載），`cache` 留在本機 SSD。
+預設的 `docker-compose.yml`（以及上面的範例）把 `cache`、`downloads`、`data` 都綁定到本機路徑，實際部署時請把 `downloads` 換成你要的最終目的地（可以是 NFS 掛載），`cache` 留在本機 SSD。
 
 ### 設定容器執行的 UID/GID
 
-容器預設以 `1000:1000` 執行（非 root——Playwright 的 sandbox 需要非 root 才會生效），寫出的檔案會是這個 UID/GID 所有。如果 bind mount 的 host 目錄（尤其是 NFS 上的 `DOWNLOADS_DIR`）屬於別的使用者，先在專案根目錄放一個 `.env` 檔指定：
+容器預設以 `1000:1000` 執行（非 root——Playwright 的 sandbox 需要非 root 才會生效），寫出的檔案會是這個 UID/GID 所有。如果 bind mount 的 host 目錄（尤其是 NFS 上的 `DOWNLOADS_DIR`）屬於別的使用者，先在 `docker-compose.yml` 旁邊放一個 `.env` 檔指定：
 
 ```bash
 echo "PUID=$(id -u)" >> .env
