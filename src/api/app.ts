@@ -1,9 +1,10 @@
 import express, { type Express } from "express";
 import { randomUUID } from "node:crypto";
 import { join, basename } from "node:path";
-import { stat, access, mkdir, rm } from "node:fs/promises";
+import { stat, access, mkdir, rm, readdir } from "node:fs/promises";
 import { SseChannel } from "./sseChannel.ts";
 import { JobStore } from "../db/jobStore.ts";
+import { sanitizeDestinationFolder, sanitizeFolderName } from "../download/destinationFolder.ts";
 import type { Candidate } from "../detection/types.ts";
 import type { DetectionResult } from "../detection/session.ts";
 import type { ManifestSegment } from "../download/manifest/types.ts";
@@ -94,6 +95,46 @@ export function createApp(deps: AppDependencies): Express {
     entry.channel.subscribe(res);
   });
 
+  app.get("/api/folders", async (req, res) => {
+    let relativeFolder: string;
+    try {
+      relativeFolder = sanitizeDestinationFolder(req.query.path);
+    } catch {
+      res.status(400).json({ error: "invalid_path" });
+      return;
+    }
+
+    try {
+      const entries = await readdir(join(deps.downloadsDir, relativeFolder), { withFileTypes: true });
+      const folders = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort((a, b) => a.localeCompare(b));
+      res.json({ folders });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        res.status(404).json({ error: "folder_not_found" });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  app.post("/api/folders", async (req, res) => {
+    let relativeParent: string;
+    let name: string;
+    try {
+      relativeParent = sanitizeDestinationFolder(req.body?.path);
+      name = sanitizeFolderName(req.body?.name);
+    } catch {
+      res.status(400).json({ error: "invalid_path" });
+      return;
+    }
+
+    await mkdir(join(deps.downloadsDir, relativeParent, name), { recursive: true });
+    res.status(201).json({ path: relativeParent ? `${relativeParent}/${name}` : name });
+  });
+
   app.post("/api/downloads", async (req, res) => {
     const { detectionId, candidateId, filename, overwrite } = req.body ?? {};
     const entry = detectionId ? detections.get(detectionId) : undefined;
@@ -107,8 +148,17 @@ export function createApp(deps: AppDependencies): Express {
       return;
     }
 
+    let destinationFolder: string;
+    try {
+      destinationFolder = sanitizeDestinationFolder(req.body?.destinationFolder);
+    } catch {
+      res.status(400).json({ error: "invalid_destination_folder" });
+      return;
+    }
+
     const sanitizedFilename = sanitizeFilename(typeof filename === "string" && filename ? filename : "download");
-    const finalPath = join(deps.downloadsDir, sanitizedFilename);
+    const finalDir = join(deps.downloadsDir, destinationFolder);
+    const finalPath = join(finalDir, sanitizedFilename);
     if (!overwrite && (await pathExists(finalPath))) {
       res.status(409).json({ error: "filename_conflict", filename: sanitizedFilename });
       return;
@@ -123,6 +173,7 @@ export function createApp(deps: AppDependencies): Express {
       sourcePageUrl: entry.result?.referer ?? "",
       candidateUrl: candidate.url,
       filename: sanitizedFilename,
+      destinationFolder,
     });
     const channel = new SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>();
     downloadChannels.set(job.id, channel);
@@ -141,7 +192,7 @@ export function createApp(deps: AppDependencies): Express {
 
       deps.jobStore.markMoving(job.id);
       channel.publish({ type: "moving", data: {} });
-      await mkdir(deps.downloadsDir, { recursive: true });
+      await mkdir(finalDir, { recursive: true });
       await deps.relocateFile(cachePath, finalPath);
       await rm(cacheJobDir, { recursive: true, force: true });
 

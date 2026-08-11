@@ -15,6 +15,7 @@ test("create() inserts a pending job with zero progress", () => {
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
 
   assert.equal(job.status, "pending");
@@ -22,9 +23,24 @@ test("create() inserts a pending job with zero progress", () => {
   assert.equal(job.sourcePageUrl, "https://example.com/live");
   assert.equal(job.candidateUrl, "https://example.com/live/hi/index.m3u8");
   assert.equal(job.filename, "my-video.ts");
+  assert.equal(job.destinationFolder, "");
   assert.equal(job.errorMessage, null);
   assert.equal(job.outputPath, null);
   assert.ok(job.id);
+});
+
+test("create() persists a nested destinationFolder (ADR-0008)", () => {
+  const store = makeStore();
+
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "電影/2024",
+  });
+
+  assert.equal(job.destinationFolder, "電影/2024");
+  assert.equal(store.get(job.id)!.destinationFolder, "電影/2024");
 });
 
 test("get() retrieves a previously created job by id", () => {
@@ -33,6 +49,7 @@ test("get() retrieves a previously created job by id", () => {
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
 
   const fetched = store.get(created.id);
@@ -51,6 +68,7 @@ test("updateProgress() moves status to downloading and records progress", () => 
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
 
   store.updateProgress(created.id, 0.42);
@@ -66,6 +84,7 @@ test("markMoving() sets status to moving", () => {
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
   store.updateProgress(created.id, 1);
 
@@ -81,6 +100,7 @@ test("markCompleted() sets status completed, progress 1, and the output path", (
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
 
   store.markCompleted(created.id, "/downloads/my-video.ts");
@@ -97,6 +117,7 @@ test("markFailed() sets status failed and records the error message", () => {
     sourcePageUrl: "https://example.com/live",
     candidateUrl: "https://example.com/live/hi/index.m3u8",
     filename: "my-video.ts",
+    destinationFolder: "",
   });
 
   store.markFailed(created.id, "connection reset");
@@ -112,11 +133,13 @@ test("list() returns jobs most-recently-created first", () => {
     sourcePageUrl: "https://example.com/a",
     candidateUrl: "https://example.com/a.m3u8",
     filename: "a.ts",
+    destinationFolder: "",
   });
   const second = store.create({
     sourcePageUrl: "https://example.com/b",
     candidateUrl: "https://example.com/b.m3u8",
     filename: "b.ts",
+    destinationFolder: "",
   });
 
   const jobs = store.list();
@@ -132,23 +155,27 @@ test("failAllInProgress() marks pending, downloading, and moving jobs as failed,
     sourcePageUrl: "https://example.com/a",
     candidateUrl: "https://example.com/a.m3u8",
     filename: "a.ts",
+    destinationFolder: "",
   });
   const downloading = store.create({
     sourcePageUrl: "https://example.com/b",
     candidateUrl: "https://example.com/b.m3u8",
     filename: "b.ts",
+    destinationFolder: "",
   });
   store.updateProgress(downloading.id, 0.5);
   const moving = store.create({
     sourcePageUrl: "https://example.com/d",
     candidateUrl: "https://example.com/d.m3u8",
     filename: "d.ts",
+    destinationFolder: "",
   });
   store.markMoving(moving.id);
   const completed = store.create({
     sourcePageUrl: "https://example.com/c",
     candidateUrl: "https://example.com/c.m3u8",
     filename: "c.ts",
+    destinationFolder: "",
   });
   store.markCompleted(completed.id, "/downloads/c.ts");
 

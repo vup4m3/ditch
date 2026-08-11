@@ -125,3 +125,93 @@ th, td {
 .status-badge.completed { color: var(--ok); }
 .status-badge.failed { color: var(--danger); }
 .status-badge.downloading, .status-badge.pending { color: var(--muted); }
+
+#folder-modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 10;
+}
+
+#folder-modal-overlay:not([hidden]) {
+  display: flex;
+}
+
+#folder-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  width: 100%;
+  max-width: 420px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+#folder-modal h2 { margin: 0; font-size: 1.1rem; }
+
+#folder-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+#folder-breadcrumb button {
+  padding: 0.15rem 0.4rem;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+}
+#folder-breadcrumb button[disabled] {
+  color: var(--fg);
+  opacity: 1;
+  cursor: default;
+}
+#folder-breadcrumb .sep { color: var(--muted); }
+
+#folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+#folder-list li button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+#folder-list li:last-child button { border-bottom: none; }
+#folder-list li button:hover { background: var(--border); }
+#folder-list .empty { padding: 0.5rem 0.75rem; color: var(--muted); }
+
+#new-folder-form { display: flex; gap: 0.5rem; }
+#new-folder-name {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+#folder-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}

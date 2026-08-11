@@ -4,6 +4,8 @@ status: accepted
 
 # Download Job 先寫入本機 SSD cache，完成後才搬移到最終目的地（可為 NFS）
 
+> **更新**：本文提到「`DOWNLOADS_DIR` 是扁平目錄」的部分已被 [ADR-0008](./0008-nested-destination-folders.md) 取代為可巢狀子目錄；以下關於 SSD cache 兩段式搬移、`rename()`/`EXDEV` fallback 的決策維持不變。
+
 原本 Download Job 直接把 segment 寫進 `DOWNLOADS_DIR` 底下的目的檔案。當 `DOWNLOADS_DIR` 指向網路掛載（例如 NFS）時，這代表整段下載期間（可能是數千次 segment write）都直接對網路檔案系統發 I/O：延遲較高、偶發性斷線/卡頓會直接中斷寫入中的檔案，且下載到一半的檔案會被使用者在目的地資料夾直接看到。
 
 改為兩段式：Download Job 先把 segment 寫進 `CACHE_DIR`（預期指向本機 SSD，低延遲、可靠）底下的 `<jobId>/<filename>`，寫完之後才整份搬到 `DOWNLOADS_DIR`（可為 NFS）底下、與使用者輸入完全一致的 `<filename>`——`DOWNLOADS_DIR` 是扁平目錄，不會像 cache 那樣用 job id 分子資料夾包起來，這樣使用者直接去目的地資料夾找檔案時，看到的名字就是自己打的那個。搬移期間任務狀態為 `moving`。

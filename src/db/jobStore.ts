@@ -7,6 +7,7 @@ interface Row {
   sourcePageUrl: string;
   candidateUrl: string;
   filename: string;
+  destinationFolder: string;
   status: JobStatus;
   progress: number;
   errorMessage: string | null;
@@ -38,6 +39,13 @@ export class JobStore {
         updatedAt TEXT NOT NULL
       )
     `);
+    try {
+      // Added for ADR-0008 (nested destination folders); pre-existing DB files won't have this
+      // column yet. SQLite has no "ADD COLUMN IF NOT EXISTS", so ignore the "duplicate column" error.
+      this.#db.exec(`ALTER TABLE download_jobs ADD COLUMN destinationFolder TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      // column already exists
+    }
   }
 
   create(input: CreateJobInput): DownloadJobRecord {
@@ -47,6 +55,7 @@ export class JobStore {
       sourcePageUrl: input.sourcePageUrl,
       candidateUrl: input.candidateUrl,
       filename: input.filename,
+      destinationFolder: input.destinationFolder,
       status: "pending",
       progress: 0,
       errorMessage: null,
@@ -57,14 +66,15 @@ export class JobStore {
     this.#db
       .prepare(
         `INSERT INTO download_jobs
-          (id, sourcePageUrl, candidateUrl, filename, status, progress, errorMessage, outputPath, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, sourcePageUrl, candidateUrl, filename, destinationFolder, status, progress, errorMessage, outputPath, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
         record.sourcePageUrl,
         record.candidateUrl,
         record.filename,
+        record.destinationFolder,
         record.status,
         record.progress,
         record.errorMessage,

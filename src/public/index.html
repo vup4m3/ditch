@@ -37,6 +37,7 @@
         <thead>
           <tr>
             <th>檔名</th>
+            <th>資料夾</th>
             <th>狀態</th>
             <th>進度</th>
             <th>來源</th>
@@ -47,6 +48,23 @@
       </table>
     </section>
   </main>
+
+  <div id="folder-modal-overlay" hidden>
+    <div id="folder-modal" role="dialog" aria-modal="true" aria-labelledby="folder-modal-title">
+      <h2 id="folder-modal-title">選擇目的資料夾</h2>
+      <nav id="folder-breadcrumb"></nav>
+      <p id="folder-modal-status" class="status" hidden></p>
+      <ul id="folder-list"></ul>
+      <form id="new-folder-form">
+        <input type="text" id="new-folder-name" placeholder="新資料夾名稱" autocomplete="off" required />
+        <button type="submit" class="secondary">新增資料夾</button>
+      </form>
+      <div id="folder-modal-actions">
+        <button type="button" id="folder-modal-cancel" class="secondary">取消</button>
+        <button type="button" id="folder-modal-confirm">選擇此資料夾</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

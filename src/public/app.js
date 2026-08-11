@@ -10,6 +10,17 @@ const activeDownloadsSection = document.getElementById("active-downloads-section
 const activeDownloadsList = document.getElementById("active-downloads-list");
 const historyBody = document.getElementById("history-body");
 
+const folderModalOverlay = document.getElementById("folder-modal-overlay");
+const folderBreadcrumb = document.getElementById("folder-breadcrumb");
+const folderModalStatus = document.getElementById("folder-modal-status");
+const folderList = document.getElementById("folder-list");
+const newFolderForm = document.getElementById("new-folder-form");
+const newFolderNameInput = document.getElementById("new-folder-name");
+const folderModalCancel = document.getElementById("folder-modal-cancel");
+const folderModalConfirm = document.getElementById("folder-modal-confirm");
+
+const LAST_DESTINATION_FOLDER_KEY = "ditch:lastDestinationFolder";
+
 let currentDetectionId = null;
 
 function setDetectStatus(text, isError) {
@@ -58,7 +69,7 @@ function renderCandidate(candidate) {
   const downloadButton = document.createElement("button");
   downloadButton.textContent = "下載";
   downloadButton.disabled = candidate.drmProtected;
-  downloadButton.addEventListener("click", () => startDownload(candidate, filenameInput.value));
+  downloadButton.addEventListener("click", () => openFolderModal(candidate, filenameInput.value));
   li.appendChild(downloadButton);
 
   candidatesList.appendChild(li);
@@ -145,17 +156,149 @@ function renderActiveDownload(jobId, filename) {
   return { row: li, fill, label };
 }
 
-async function startDownload(candidate, filename, overwrite = false) {
+let folderModalState = null;
+
+function joinFolderPath(parent, child) {
+  return parent ? `${parent}/${child}` : child;
+}
+
+function openFolderModal(candidate, filename) {
+  folderModalState = { candidate, filename, currentPath: localStorage.getItem(LAST_DESTINATION_FOLDER_KEY) || "" };
+  folderModalOverlay.hidden = false;
+  newFolderNameInput.value = "";
+  loadFolderLevel(folderModalState.currentPath);
+}
+
+function closeFolderModal() {
+  folderModalOverlay.hidden = true;
+  folderModalState = null;
+}
+
+function setFolderModalStatus(text, isError) {
+  folderModalStatus.hidden = !text;
+  folderModalStatus.textContent = text;
+  folderModalStatus.classList.toggle("error", !!isError);
+}
+
+function renderBreadcrumb(path) {
+  folderBreadcrumb.innerHTML = "";
+  const segments = path ? path.split("/") : [];
+
+  const rootButton = document.createElement("button");
+  rootButton.type = "button";
+  rootButton.textContent = "（根目錄）";
+  rootButton.disabled = segments.length === 0;
+  rootButton.addEventListener("click", () => loadFolderLevel(""));
+  folderBreadcrumb.appendChild(rootButton);
+
+  let builtPath = "";
+  segments.forEach((segment, index) => {
+    builtPath = joinFolderPath(builtPath, segment);
+    const sep = document.createElement("span");
+    sep.className = "sep";
+    sep.textContent = "/";
+    folderBreadcrumb.appendChild(sep);
+
+    const targetPath = builtPath;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = segment;
+    button.disabled = index === segments.length - 1;
+    button.addEventListener("click", () => loadFolderLevel(targetPath));
+    folderBreadcrumb.appendChild(button);
+  });
+}
+
+function renderFolderList(folders, currentPath) {
+  folderList.innerHTML = "";
+  if (folders.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "沒有子資料夾";
+    folderList.appendChild(li);
+    return;
+  }
+  for (const name of folders) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `📁 ${name}`;
+    button.addEventListener("click", () => loadFolderLevel(joinFolderPath(currentPath, name)));
+    li.appendChild(button);
+    folderList.appendChild(li);
+  }
+}
+
+async function loadFolderLevel(path) {
+  setFolderModalStatus("載入中…", false);
+  try {
+    const res = await fetch(`/api/folders?path=${encodeURIComponent(path)}`);
+    if (res.status === 404 && path !== "") {
+      await loadFolderLevel("");
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { folders } = await res.json();
+    folderModalState.currentPath = path;
+    setFolderModalStatus("", false);
+    renderBreadcrumb(path);
+    renderFolderList(folders, path);
+  } catch (err) {
+    setFolderModalStatus(`載入資料夾失敗：${err.message}`, true);
+  }
+}
+
+newFolderForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = newFolderNameInput.value.trim();
+  if (!folderModalState) return;
+  if (!name) {
+    setFolderModalStatus("請先輸入新資料夾名稱", true);
+    newFolderNameInput.focus();
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/folders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: folderModalState.currentPath, name }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    newFolderNameInput.value = "";
+    await loadFolderLevel(folderModalState.currentPath);
+  } catch (err) {
+    setFolderModalStatus(`新增資料夾失敗：${err.message}`, true);
+  }
+});
+
+folderModalCancel.addEventListener("click", () => closeFolderModal());
+
+folderModalConfirm.addEventListener("click", () => {
+  if (!folderModalState) return;
+  const { candidate, filename, currentPath } = folderModalState;
+  localStorage.setItem(LAST_DESTINATION_FOLDER_KEY, currentPath);
+  closeFolderModal();
+  startDownload(candidate, filename, currentPath);
+});
+
+async function startDownload(candidate, filename, destinationFolder = "", overwrite = false) {
   if (!currentDetectionId) return;
   const res = await fetch("/api/downloads", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ detectionId: currentDetectionId, candidateId: candidate.id, filename, overwrite }),
+    body: JSON.stringify({
+      detectionId: currentDetectionId,
+      candidateId: candidate.id,
+      filename,
+      destinationFolder,
+      overwrite,
+    }),
   });
   if (res.status === 409) {
     const { filename: conflictFilename } = await res.json();
     if (confirm(`已有名為「${conflictFilename}」的檔案，要覆蓋嗎？`)) {
-      await startDownload(candidate, filename, true);
+      await startDownload(candidate, filename, destinationFolder, true);
     }
     return;
   }
@@ -205,6 +348,10 @@ async function loadHistory() {
     const filenameCell = document.createElement("td");
     filenameCell.textContent = job.filename;
     tr.appendChild(filenameCell);
+
+    const folderCell = document.createElement("td");
+    folderCell.textContent = job.destinationFolder || "-";
+    tr.appendChild(folderCell);
 
     const statusCell = document.createElement("td");
     const badge = document.createElement("span");

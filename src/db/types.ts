@@ -5,6 +5,8 @@ export interface DownloadJobRecord {
   sourcePageUrl: string;
   candidateUrl: string;
   filename: string;
+  /** Relative path under DOWNLOADS_DIR the file was saved into; "" means the root (see ADR-0008). */
+  destinationFolder: string;
   status: JobStatus;
   progress: number;
   errorMessage: string | null;
@@ -17,4 +19,5 @@ export interface CreateJobInput {
   sourcePageUrl: string;
   candidateUrl: string;
   filename: string;
+  destinationFolder: string;
 }

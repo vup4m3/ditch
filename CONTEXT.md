@@ -13,5 +13,9 @@ _Avoid_: Stream（過於籠統，未區分「偵測到的候選項目」與「�
 _Avoid_: Scan, Crawl
 
 **Download Job**:
-使用者從某次 Detection Session 的 Candidate 清單中選定一項後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機的一次任務；具備可追蹤的進度。
+使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。
 _Avoid_: Task, Recording（本專案不含開放式直播錄製，只做單一影片下載）
+
+**Destination Folder**:
+使用者為某次 Download Job 指定、位於 `DOWNLOADS_DIR` 底下的子資料夾路徑，決定完成後的檔案存放位置；可以是根目錄本身，也可以是任意深度的巢狀子資料夾，送出下載請求前透過資料夾選擇視窗設定，尚不存在的子資料夾可在選擇當下新建。
+_Avoid_: Path, Output Directory（容易跟代表整個伺服器設定值的 `DOWNLOADS_DIR` 混淆）
