@@ -43,9 +43,13 @@
 
     <section id="history-section">
       <h2>下載紀錄</h2>
+      <div id="history-batch-actions">
+        <button type="button" id="delete-selected-button" class="secondary" disabled>刪除選取項目</button>
+      </div>
       <table id="history-table">
         <thead>
           <tr>
+            <th><input type="checkbox" id="select-all-checkbox" /></th>
             <th>檔名</th>
             <th>資料夾</th>
             <th>狀態</th>

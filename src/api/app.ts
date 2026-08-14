@@ -261,20 +261,33 @@ export function createApp(deps: AppDependencies): Express {
     }
   });
 
+  // "Cancel" (queued) and "delete a history record" (completed/failed/cancelled) are different
+  // concepts sharing one action — both mean "I don't want this one anymore" (ADR-0010).
   app.delete("/api/downloads/:id", (req, res) => {
     const id = req.params.id!;
-    const cancelled = deps.jobStore.cancel(id);
-    if (!cancelled) {
-      const job = deps.jobStore.get(id);
-      res.status(job ? 409 : 404).json({ error: job ? "not_queued" : "not_found" });
+
+    if (deps.jobStore.cancel(id)) {
+      jobWork.delete(id);
+      const channel = downloadChannels.get(id);
+      channel?.publish({ type: "cancelled", data: {} });
+      channel?.close();
+      downloadChannels.delete(id);
+      broadcastQueuePositions(); // jobs behind the cancelled one moved up
+      res.status(200).json({ ok: true });
       return;
     }
-    jobWork.delete(id);
-    const channel = downloadChannels.get(id);
-    channel?.publish({ type: "cancelled", data: {} });
-    channel?.close();
+
+    const job = deps.jobStore.get(id);
+    if (!job) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    if (!deps.jobStore.remove(id)) {
+      res.status(409).json({ error: "not_deletable" }); // still holds an execution slot (pending/downloading/moving)
+      return;
+    }
+    downloadChannels.get(id)?.close();
     downloadChannels.delete(id);
-    broadcastQueuePositions(); // jobs behind the cancelled one moved up
     res.status(200).json({ ok: true });
   });
 

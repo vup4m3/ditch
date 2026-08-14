@@ -643,6 +643,62 @@ test("DELETE /api/downloads/:id cancels a queued job, refuses an active one, and
   });
 });
 
+test("DELETE /api/downloads/:id deletes a completed or failed job's history record, without touching the file (ADR-0010)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          if (outputPath.endsWith("boom.ts")) throw new Error("network exploded");
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, "fake-video-bytes");
+        },
+      }),
+    );
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const completedRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "ok.ts" }),
+      });
+      const { id: completedJobId } = (await completedRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/downloads/${completedJobId}/events`, 3);
+
+      const failedRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "boom.ts" }),
+      });
+      const { id: failedJobId } = (await failedRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/downloads/${failedJobId}/events`, 1);
+
+      const deleteCompletedRes = await fetch(`${baseUrl}/api/downloads/${completedJobId}`, { method: "DELETE" });
+      assert.equal(deleteCompletedRes.status, 200);
+      const deleteFailedRes = await fetch(`${baseUrl}/api/downloads/${failedJobId}`, { method: "DELETE" });
+      assert.equal(deleteFailedRes.status, 200);
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string }>;
+      assert.equal(jobs.find((j) => j.id === completedJobId), undefined, "the record is gone");
+      assert.equal(jobs.find((j) => j.id === failedJobId), undefined, "the record is gone");
+
+      // the file on disk is untouched (ADR-0010) even though its history record is gone
+      assert.equal(await readFile(join(dirs.downloadsDir, "ok.ts"), "utf8"), "fake-video-bytes");
+
+      const redeleteRes = await fetch(`${baseUrl}/api/downloads/${completedJobId}`, { method: "DELETE" });
+      assert.equal(redeleteRes.status, 404, "deleting an already-deleted record is unknown, not a conflict");
+    } finally {
+      await close();
+    }
+  });
+});
+
 test("queue positions shift down for jobs behind one that gets cancelled (ADR-0009)", async () => {
   await withTempDirs(async (dirs) => {
     const neverResolves = new Promise<void>(() => {});

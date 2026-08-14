@@ -276,3 +276,66 @@ test("failAllInProgress() marks pending, downloading, and moving jobs as failed,
   assert.equal(store.get(moving.id)!.status, "failed");
   assert.equal(store.get(completed.id)!.status, "completed");
 });
+
+test("remove() deletes a completed job's record and reports success (ADR-0010)", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+  });
+  store.markCompleted(job.id, "/downloads/my-video.ts");
+
+  const removed = store.remove(job.id);
+
+  assert.equal(removed, true);
+  assert.equal(store.get(job.id), undefined);
+});
+
+test("remove() deletes a failed or cancelled job's record too", () => {
+  const store = makeStore();
+  const failed = store.create({
+    sourcePageUrl: "https://example.com/a",
+    candidateUrl: "https://example.com/a.m3u8",
+    filename: "a.ts",
+    destinationFolder: "",
+  });
+  store.markFailed(failed.id, "connection reset");
+  const cancelled = store.create({
+    sourcePageUrl: "https://example.com/b",
+    candidateUrl: "https://example.com/b.m3u8",
+    filename: "b.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+  store.cancel(cancelled.id);
+
+  assert.equal(store.remove(failed.id), true);
+  assert.equal(store.remove(cancelled.id), true);
+  assert.equal(store.get(failed.id), undefined);
+  assert.equal(store.get(cancelled.id), undefined);
+});
+
+test("remove() no-ops for a job still holding an execution slot, and for an unknown id", () => {
+  const store = makeStore();
+  const pending = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+  });
+  const queued = store.create({
+    sourcePageUrl: "https://example.com/live2",
+    candidateUrl: "https://example.com/live2/hi/index.m3u8",
+    filename: "other-video.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+
+  assert.equal(store.remove(pending.id), false);
+  assert.equal(store.remove(queued.id), false, "a queued job is cancelled, not deleted");
+  assert.equal(store.remove("does-not-exist"), false);
+  assert.equal(store.get(pending.id)!.status, "pending");
+  assert.equal(store.get(queued.id)!.status, "queued");
+});

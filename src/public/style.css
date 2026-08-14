@@ -126,6 +126,8 @@ button.secondary { background: transparent; color: var(--accent); }
   transition: width 0.2s ease;
 }
 
+#history-batch-actions { margin-bottom: 0.5rem; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td {
   text-align: left;

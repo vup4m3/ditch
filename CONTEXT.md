@@ -27,3 +27,7 @@ _Avoid_: Max Downloads（容易誤解成「累計下載總數」而非「同時�
 **Queue**:
 因為 Concurrency Limit 已滿而尚未取得執行名額、狀態為 `queued` 的 Download Job 集合，依建立時間先進先出遞補名額。使用者可以取消還在 Queue 中、尚未真正開始執行的 Download Job；已取得名額執行中的則不可取消。
 _Avoid_: Waitlist, Backlog
+
+**Delete（刪除歷史紀錄）**:
+使用者從下載紀錄中移除一筆已經結束（`completed`／`failed`／`cancelled`）的 Download Job；只清除伺服器內部保存的這筆紀錄本身，不會刪除已下載完成的檔案，也不會清 `CACHE_DIR` 裡任何殘留的暫存檔。跟 Queue 的「取消」是不同語意——取消是在 Download Job 還沒開始執行前不讓它開始，刪除是清掉一件已經結束的事——兩者共用同一個 `DELETE /api/downloads/:id`，依 Download Job 當下的狀態決定實際要做取消還是刪除。
+_Avoid_: Remove（容易跟「取消」混為一談）, Clear History（範圍容易誤解成一次清空全部）

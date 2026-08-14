@@ -9,6 +9,8 @@ const candidatesList = document.getElementById("candidates-list");
 const activeDownloadsSection = document.getElementById("active-downloads-section");
 const activeDownloadsList = document.getElementById("active-downloads-list");
 const historyBody = document.getElementById("history-body");
+const selectAllCheckbox = document.getElementById("select-all-checkbox");
+const deleteSelectedButton = document.getElementById("delete-selected-button");
 
 const settingsForm = document.getElementById("settings-form");
 const concurrencyLimitInput = document.getElementById("concurrency-limit-input");
@@ -421,14 +423,77 @@ function statusLabel(status) {
   );
 }
 
+// A record can only be deleted once it's done — same terminal states "cancel" hands off to
+// "delete" for (ADR-0010). Jobs still occupying an execution slot get no checkbox at all.
+const DELETABLE_STATUSES = ["completed", "failed", "cancelled"];
+const selectedJobIds = new Set();
+
+function isDeletable(status) {
+  return DELETABLE_STATUSES.includes(status);
+}
+
+async function deleteJobs(ids) {
+  await Promise.all(ids.map((id) => fetch(`/api/downloads/${id}`, { method: "DELETE" })));
+  for (const id of ids) selectedJobIds.delete(id);
+  loadHistory();
+}
+
+function updateBatchButtonState() {
+  const count = selectedJobIds.size;
+  deleteSelectedButton.disabled = count === 0;
+  deleteSelectedButton.textContent = count > 0 ? `刪除選取項目 (${count})` : "刪除選取項目";
+}
+
+function updateSelectAllCheckbox(deletableCount) {
+  selectAllCheckbox.checked = deletableCount > 0 && selectedJobIds.size === deletableCount;
+  selectAllCheckbox.indeterminate = selectedJobIds.size > 0 && selectedJobIds.size < deletableCount;
+}
+
+selectAllCheckbox.addEventListener("change", () => {
+  for (const checkbox of historyBody.querySelectorAll("input[type=checkbox][data-job-id]")) {
+    checkbox.checked = selectAllCheckbox.checked;
+    if (selectAllCheckbox.checked) selectedJobIds.add(checkbox.dataset.jobId);
+    else selectedJobIds.delete(checkbox.dataset.jobId);
+  }
+  updateBatchButtonState();
+});
+
+deleteSelectedButton.addEventListener("click", async () => {
+  const ids = [...selectedJobIds];
+  if (ids.length === 0) return;
+  if (ids.length >= 2 && !confirm(`確定要刪除 ${ids.length} 筆紀錄嗎？`)) return;
+  await deleteJobs(ids);
+});
+
 async function loadHistory() {
   const res = await fetch("/api/downloads");
   if (!res.ok) return;
   const jobs = await res.json();
 
+  const currentDeletableIds = new Set(jobs.filter((job) => isDeletable(job.status)).map((job) => job.id));
+  for (const id of [...selectedJobIds]) {
+    if (!currentDeletableIds.has(id)) selectedJobIds.delete(id);
+  }
+
   historyBody.innerHTML = "";
   for (const job of jobs) {
     const tr = document.createElement("tr");
+
+    const checkboxCell = document.createElement("td");
+    if (isDeletable(job.status)) {
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.jobId = job.id;
+      checkbox.checked = selectedJobIds.has(job.id);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedJobIds.add(job.id);
+        else selectedJobIds.delete(job.id);
+        updateBatchButtonState();
+        updateSelectAllCheckbox(currentDeletableIds.size);
+      });
+      checkboxCell.appendChild(checkbox);
+    }
+    tr.appendChild(checkboxCell);
 
     const filenameCell = document.createElement("td");
     filenameCell.textContent = job.filename;
@@ -465,12 +530,25 @@ async function loadHistory() {
       link.textContent = "下載檔案";
       actionCell.appendChild(link);
     } else if (job.status === "failed" && job.errorMessage) {
-      actionCell.textContent = job.errorMessage;
+      const errorText = document.createElement("span");
+      errorText.textContent = job.errorMessage;
+      actionCell.appendChild(errorText);
+    }
+    if (isDeletable(job.status)) {
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "secondary";
+      deleteButton.textContent = "刪除";
+      deleteButton.addEventListener("click", () => deleteJobs([job.id]));
+      actionCell.appendChild(deleteButton);
     }
     tr.appendChild(actionCell);
 
     historyBody.appendChild(tr);
   }
+
+  updateBatchButtonState();
+  updateSelectAllCheckbox(currentDeletableIds.size);
 }
 
 loadHistory();

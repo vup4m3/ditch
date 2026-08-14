@@ -114,6 +114,18 @@ export class JobStore {
     return Number(result.changes) > 0;
   }
 
+  /**
+   * Deletes a job's record entirely once it's reached a terminal state — completed, failed, or
+   * cancelled (ADR-0010). Files already on disk (a completed download, a failed job's cache
+   * leftovers) are untouched; this only clears the history entry. Returns whether it applied.
+   */
+  remove(id: string): boolean {
+    const result = this.#db
+      .prepare(`DELETE FROM download_jobs WHERE id = ? AND status IN ('completed', 'failed', 'cancelled')`)
+      .run(id);
+    return Number(result.changes) > 0;
+  }
+
   /** Called once the file is fully written to cache and is being relocated to its final destination. */
   markMoving(id: string): void {
     this.#db
