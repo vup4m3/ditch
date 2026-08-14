@@ -10,6 +10,8 @@ export interface DetectionResult {
   cookie?: string;
   /** The page's <title>, offered to the user as a default download filename (Q13). */
   pageTitle: string;
+  /** Shared by every Candidate found this session — best-effort, may be absent (ADR-0011). */
+  thumbnail?: { data: Buffer; contentType: string };
 }
 
 export interface RunDetectionOptions {
@@ -75,6 +77,62 @@ function collectPlayerGlobalSources(): PlayerGlobalSource[] {
     // best-effort only
   }
   return found;
+}
+
+/**
+ * Best-effort screenshot of the largest <video> element on the page, falling back to the
+ * page's own og:image/poster metadata when no video rendered a usable frame (ADR-0011).
+ */
+async function captureThumbnail(page: import("playwright").Page): Promise<{ data: Buffer; contentType: string } | undefined> {
+  try {
+    const videoHandle = await page.evaluateHandle(() => {
+      let largest: HTMLVideoElement | null = null;
+      let largestArea = 0;
+      for (const video of Array.from(document.querySelectorAll("video"))) {
+        const rect = video.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        if (area > largestArea) {
+          largestArea = area;
+          largest = video;
+        }
+      }
+      return largest;
+    });
+    const videoElement = videoHandle.asElement();
+    if (videoElement) {
+      const data = await videoElement.screenshot({ type: "jpeg", quality: 80 });
+      await videoHandle.dispose();
+      if (data.length > 0) return { data, contentType: "image/jpeg" };
+    } else {
+      await videoHandle.dispose();
+    }
+  } catch {
+    // best-effort — fall through to the meta-tag fallback
+  }
+
+  try {
+    const fallbackUrl = await page.evaluate(() => {
+      const og = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
+      if (og) return og;
+      return document.querySelector("video[poster]")?.getAttribute("poster") ?? null;
+    });
+    if (!fallbackUrl) return undefined;
+
+    const fetched = await page.evaluate(async (url) => {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const contentType = res.headers.get("content-type") || "image/jpeg";
+      const buffer = await res.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return { base64: btoa(binary), contentType };
+    }, fallbackUrl);
+    if (!fetched) return undefined;
+    return { data: Buffer.from(fetched.base64, "base64"), contentType: fetched.contentType };
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runDetectionSession(
@@ -149,8 +207,9 @@ export async function runDetectionSession(
     const cookies = await context.cookies(pageUrl);
     const cookie = cookies.length > 0 ? cookies.map((c) => `${c.name}=${c.value}`).join("; ") : undefined;
     const pageTitle = await page.title();
+    const thumbnail = await captureThumbnail(page);
 
-    return { candidates, referer: pageUrl, userAgent, cookie, pageTitle };
+    return { candidates, referer: pageUrl, userAgent, cookie, pageTitle, thumbnail };
   } finally {
     await browser.close();
   }

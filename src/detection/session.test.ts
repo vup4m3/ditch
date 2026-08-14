@@ -107,6 +107,84 @@ test("invokes onCandidate as each candidate is found, matching the final result"
   }
 });
 
+test("captures a screenshot of the largest <video> element as the thumbnail (ADR-0011)", async () => {
+  const { baseUrl, server } = await startFixtureServer({
+    "/page": {
+      contentType: "text/html",
+      body: `<!doctype html><html><body>
+        <video style="width:200px;height:120px;background:red;"></video>
+      </body></html>`,
+    },
+  });
+
+  try {
+    const result = await runDetectionSession(`${baseUrl}/page`, { timeoutMs: 500 });
+
+    // no og:image/poster in this fixture, so a defined thumbnail can only have come from the
+    // screenshot path
+    assert.ok(result.thumbnail, "expected a screenshot-derived thumbnail");
+    assert.equal(result.thumbnail?.contentType, "image/jpeg");
+    assert.ok((result.thumbnail?.data.length ?? 0) > 0);
+  } finally {
+    stopServer(server);
+  }
+});
+
+test("falls back to og:image when there's no usable <video> element (ADR-0011)", async () => {
+  const { baseUrl, server } = await startFixtureServer({
+    "/page": {
+      contentType: "text/html",
+      body: `<!doctype html><html><head>
+        <meta property="og:image" content="/cover.png" />
+      </head><body></body></html>`,
+    },
+    "/cover.png": { contentType: "image/png", body: "fake-png-bytes" },
+  });
+
+  try {
+    const result = await runDetectionSession(`${baseUrl}/page`, { timeoutMs: 500 });
+
+    assert.equal(result.thumbnail?.contentType, "image/png");
+    assert.equal(result.thumbnail?.data.toString("utf8"), "fake-png-bytes");
+  } finally {
+    stopServer(server);
+  }
+});
+
+test("falls back to <video poster> when there's no og:image and the video itself has no visible area (ADR-0011)", async () => {
+  const { baseUrl, server } = await startFixtureServer({
+    "/page": {
+      contentType: "text/html",
+      body: `<!doctype html><html><body>
+        <video style="width:0;height:0;" poster="/poster.jpg"></video>
+      </body></html>`,
+    },
+    "/poster.jpg": { contentType: "image/jpeg", body: "fake-poster-bytes" },
+  });
+
+  try {
+    const result = await runDetectionSession(`${baseUrl}/page`, { timeoutMs: 500 });
+
+    assert.equal(result.thumbnail?.data.toString("utf8"), "fake-poster-bytes");
+  } finally {
+    stopServer(server);
+  }
+});
+
+test("has no thumbnail when there's no <video>, og:image, or poster to fall back to (ADR-0011)", async () => {
+  const { baseUrl, server } = await startFixtureServer({
+    "/page": { contentType: "text/html", body: `<!doctype html><html><body>plain page</body></html>` },
+  });
+
+  try {
+    const result = await runDetectionSession(`${baseUrl}/page`, { timeoutMs: 500 });
+
+    assert.equal(result.thumbnail, undefined);
+  } finally {
+    stopServer(server);
+  }
+});
+
 test("calls play() on <video> elements found on the page", async () => {
   let playCalled = false;
   const server = createServer((req, res) => {

@@ -51,6 +51,20 @@ function renderCandidate(candidate) {
   li.className = "candidate-row";
   li.dataset.candidateId = candidate.id;
 
+  // Placeholder box until (if ever) the Detection Session's shared thumbnail loads — it isn't
+  // ready until detection finishes, so the src is only set once "done" fires (ADR-0011).
+  const thumbnailWrap = document.createElement("span");
+  thumbnailWrap.className = "thumbnail-wrap";
+  const thumbnail = document.createElement("img");
+  thumbnail.className = "thumbnail";
+  thumbnail.alt = "";
+  thumbnail.hidden = true;
+  thumbnail.addEventListener("load", () => {
+    thumbnail.hidden = false;
+  });
+  thumbnailWrap.appendChild(thumbnail);
+  li.appendChild(thumbnailWrap);
+
   const meta = document.createElement("span");
   meta.className = "meta";
   meta.textContent = `${candidate.type.toUpperCase()}${candidate.label ? " · " + candidate.label : ""}`;
@@ -79,6 +93,13 @@ function renderCandidate(candidate) {
   li.appendChild(downloadButton);
 
   candidatesList.appendChild(li);
+}
+
+function applyThumbnails(detectionId) {
+  const src = `/api/detections/${detectionId}/thumbnail`;
+  for (const img of candidatesList.querySelectorAll("img.thumbnail")) {
+    img.src = src;
+  }
 }
 
 function backfillDefaultFilenames(pageTitle) {
@@ -159,6 +180,7 @@ detectForm.addEventListener("submit", async (event) => {
     source.addEventListener("done", (e) => {
       const data = JSON.parse(e.data);
       backfillDefaultFilenames(data.pageTitle || "");
+      applyThumbnails(id);
       const count = candidatesList.children.length;
       setDetectStatus(count > 0 ? `偵測完成，找到 ${count} 個項目` : "偵測完成，沒有找到可下載的項目", count === 0);
       source.close();

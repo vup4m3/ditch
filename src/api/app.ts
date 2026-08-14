@@ -168,6 +168,17 @@ export function createApp(deps: AppDependencies): Express {
     entry.channel.subscribe(res);
   });
 
+  // Shared by every Candidate this Detection Session found — not ready until detection
+  // finishes (the video needs time to render a frame), so 404 until then (ADR-0011).
+  app.get("/api/detections/:id/thumbnail", (req, res) => {
+    const thumbnail = detections.get(req.params.id!)?.result?.thumbnail;
+    if (!thumbnail) {
+      res.status(404).end();
+      return;
+    }
+    res.set("Content-Type", thumbnail.contentType).send(thumbnail.data);
+  });
+
   app.get("/api/folders", async (req, res) => {
     let relativeFolder: string;
     try {

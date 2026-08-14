@@ -150,6 +150,73 @@ test("full happy path: detect, list candidate, download (via cache), see it comp
   });
 });
 
+test("GET /api/detections/:id/thumbnail 404s for an unknown detection id", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      const res = await fetch(`${baseUrl}/api/detections/does-not-exist/thumbnail`);
+      assert.equal(res.status, 404);
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("GET /api/detections/:id/thumbnail serves the session's shared thumbnail once detection finishes (ADR-0011)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        runDetection: async (pageUrl, onCandidate) => {
+          onCandidate(CANDIDATE);
+          return {
+            candidates: [CANDIDATE],
+            referer: pageUrl,
+            userAgent: "fake-agent/1.0",
+            pageTitle: "Example Live Stream",
+            thumbnail: { data: Buffer.from("fake-jpeg-bytes"), contentType: "image/jpeg" },
+          };
+        },
+      }),
+    );
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const thumbRes = await fetch(`${baseUrl}/api/detections/${detectionId}/thumbnail`);
+      assert.equal(thumbRes.status, 200);
+      assert.equal(thumbRes.headers.get("content-type"), "image/jpeg");
+      assert.equal(await thumbRes.text(), "fake-jpeg-bytes");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("GET /api/detections/:id/thumbnail 404s once detection finishes without finding a usable thumbnail", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs)); // default mock returns no thumbnail
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const thumbRes = await fetch(`${baseUrl}/api/detections/${detectionId}/thumbnail`);
+      assert.equal(thumbRes.status, 404);
+    } finally {
+      await close();
+    }
+  });
+});
+
 test("rejects a download request that would overwrite an existing file with 409, unless overwrite is set", async () => {
   await withTempDirs(async (dirs) => {
     let attempt = 0;

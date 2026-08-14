@@ -12,6 +12,10 @@ _Avoid_: Stream（過於籠統，未區分「偵測到的候選項目」與「�
 針對單一頁面網址啟動無頭瀏覽器、載入頁面並執行偵測邏輯，產出一份 Candidate 清單的一次操作。
 _Avoid_: Scan, Crawl
 
+**Thumbnail（縮圖）**:
+一次 Detection Session 底下所有 Candidate 共用的一張畫面，讓使用者在下載前先確認「這是不是我要的影片」。優先用 Playwright 對頁面上渲染尺寸最大的 `<video>` 元素截圖（不需要 ffmpeg，也不受 DRM／跨網域畫布安全限制影響）；截不到才退回讀頁面的 `<meta property="og:image">` 或 `<video poster>`。跟整個 Detection Session 一樣純記憶體、伺服器重啟就消失，不逐一配對到個別 Candidate（同一次偵測的 Candidate 通常是同一支影片的不同畫質，共用一張縮圖）。
+_Avoid_: Poster（容易誤以為只從 `<video poster>` 屬性取得，實際上優先來源是截圖）, Preview
+
 **Download Job**:
 使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。若當下已達 Concurrency Limit，會先以 `queued` 狀態進 Queue 等待，取得執行名額後才真正開始。
 _Avoid_: Task, Recording（本專案不含開放式直播錄製，只做單一影片下載）
