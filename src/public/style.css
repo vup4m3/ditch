@@ -37,6 +37,18 @@ header { margin-bottom: 1.5rem; }
 h1 { margin: 0; }
 .subtitle { color: var(--muted); margin: 0.25rem 0 0; }
 
+#settings-section { margin-top: 0.75rem; font-size: 0.9rem; }
+#settings-section summary { cursor: pointer; color: var(--accent); }
+#settings-form { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+#concurrency-limit-input {
+  width: 4rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
 section { margin-bottom: 2rem; }
 
 #detect-form { display: flex; gap: 0.5rem; }
@@ -124,7 +136,7 @@ th, td {
 .status-badge { padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; }
 .status-badge.completed { color: var(--ok); }
 .status-badge.failed { color: var(--danger); }
-.status-badge.downloading, .status-badge.pending { color: var(--muted); }
+.status-badge.downloading, .status-badge.pending, .status-badge.queued, .status-badge.cancelled { color: var(--muted); }
 
 #folder-modal-overlay {
   display: none;

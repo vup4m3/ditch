@@ -10,6 +10,10 @@ const activeDownloadsSection = document.getElementById("active-downloads-section
 const activeDownloadsList = document.getElementById("active-downloads-list");
 const historyBody = document.getElementById("history-body");
 
+const settingsForm = document.getElementById("settings-form");
+const concurrencyLimitInput = document.getElementById("concurrency-limit-input");
+const settingsStatus = document.getElementById("settings-status");
+
 const folderModalOverlay = document.getElementById("folder-modal-overlay");
 const folderBreadcrumb = document.getElementById("folder-breadcrumb");
 const folderModalStatus = document.getElementById("folder-modal-status");
@@ -89,6 +93,42 @@ function backfillDefaultFilenames(pageTitle) {
   }
 }
 
+function setSettingsStatus(text, isError) {
+  settingsStatus.hidden = !text;
+  settingsStatus.textContent = text;
+  settingsStatus.classList.toggle("error", !!isError);
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch("/api/settings");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { concurrencyLimit } = await res.json();
+    concurrencyLimitInput.value = concurrencyLimit;
+  } catch (err) {
+    setSettingsStatus(`載入設定失敗：${err.message}`, true);
+  }
+}
+
+settingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const res = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ concurrencyLimit: Number(concurrencyLimitInput.value) }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { concurrencyLimit } = await res.json();
+    concurrencyLimitInput.value = concurrencyLimit;
+    setSettingsStatus("已儲存", false);
+  } catch (err) {
+    setSettingsStatus(`儲存失敗：${err.message}`, true);
+  }
+});
+
+loadSettings();
+
 detectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const pageUrl = pageUrlInput.value.trim();
@@ -134,14 +174,18 @@ detectForm.addEventListener("submit", async (event) => {
   }
 });
 
-function renderActiveDownload(jobId, filename) {
+function queuedLabel(filename, position) {
+  return position ? `${filename}（排隊中，第 ${position} 位）` : `${filename}（排隊中）`;
+}
+
+function renderActiveDownload(jobId, filename, initialStatus, queuePosition) {
   const li = document.createElement("li");
   li.className = "active-download-row";
   li.dataset.jobId = jobId;
 
   const label = document.createElement("span");
   label.className = "meta";
-  label.textContent = filename;
+  label.textContent = initialStatus === "queued" ? queuedLabel(filename, queuePosition) : filename;
   li.appendChild(label);
 
   const bar = document.createElement("div");
@@ -151,9 +195,17 @@ function renderActiveDownload(jobId, filename) {
   bar.appendChild(fill);
   li.appendChild(bar);
 
+  // Only a still-queued job can be cancelled (ADR-0009) — hidden once it starts downloading.
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "secondary";
+  cancelButton.textContent = "取消";
+  cancelButton.hidden = initialStatus !== "queued";
+  li.appendChild(cancelButton);
+
   activeDownloadsSection.hidden = false;
   activeDownloadsList.appendChild(li);
-  return { row: li, fill, label };
+  return { row: li, fill, label, cancelButton };
 }
 
 let folderModalState = null;
@@ -306,11 +358,29 @@ async function startDownload(candidate, filename, destinationFolder = "", overwr
     setDetectStatus(`建立下載任務失敗 (HTTP ${res.status})`, true);
     return;
   }
-  const { id: jobId } = await res.json();
-  const { row, fill, label } = renderActiveDownload(jobId, filename);
+  const { id: jobId, status, queuePosition } = await res.json();
+  const { row, fill, label, cancelButton } = renderActiveDownload(jobId, filename, status, queuePosition);
 
   const source = new EventSource(`/api/downloads/${jobId}/events`);
+
+  cancelButton.addEventListener("click", async () => {
+    cancelButton.disabled = true;
+    const cancelRes = await fetch(`/api/downloads/${jobId}`, { method: "DELETE" });
+    if (cancelRes.ok) {
+      source.close();
+      row.remove();
+      loadHistory();
+    } else {
+      cancelButton.disabled = false;
+    }
+  });
+
+  source.addEventListener("queued", (e) => {
+    label.textContent = queuedLabel(filename, JSON.parse(e.data).position);
+  });
   source.addEventListener("progress", (e) => {
+    cancelButton.hidden = true; // no longer queued — it's running now, can't be cancelled (ADR-0009)
+    label.textContent = filename;
     const data = JSON.parse(e.data);
     const pct = data.totalSegments > 0 ? Math.round((data.completedSegments / data.totalSegments) * 100) : 0;
     fill.style.width = `${pct}%`;
@@ -330,10 +400,25 @@ async function startDownload(candidate, filename, destinationFolder = "", overwr
     row.remove();
     loadHistory();
   });
+  source.addEventListener("cancelled", () => {
+    source.close();
+    row.remove();
+    loadHistory();
+  });
 }
 
 function statusLabel(status) {
-  return { pending: "等待中", downloading: "下載中", moving: "搬移到目的地中", completed: "已完成", failed: "失敗" }[status] || status;
+  return (
+    {
+      queued: "排隊中",
+      pending: "等待中",
+      downloading: "下載中",
+      moving: "搬移到目的地中",
+      completed: "已完成",
+      failed: "失敗",
+      cancelled: "已取消",
+    }[status] || status
+  );
 }
 
 async function loadHistory() {

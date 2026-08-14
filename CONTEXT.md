@@ -13,9 +13,17 @@ _Avoid_: Stream（過於籠統，未區分「偵測到的候選項目」與「�
 _Avoid_: Scan, Crawl
 
 **Download Job**:
-使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。
+使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。若當下已達 Concurrency Limit，會先以 `queued` 狀態進 Queue 等待，取得執行名額後才真正開始。
 _Avoid_: Task, Recording（本專案不含開放式直播錄製，只做單一影片下載）
 
 **Destination Folder**:
 使用者為某次 Download Job 指定、位於 `DOWNLOADS_DIR` 底下的子資料夾路徑，決定完成後的檔案存放位置；可以是根目錄本身，也可以是任意深度的巢狀子資料夾，送出下載請求前透過資料夾選擇視窗設定，尚不存在的子資料夾可在選擇當下新建。
 _Avoid_: Path, Output Directory（容易跟代表整個伺服器設定值的 `DOWNLOADS_DIR` 混淆）
+
+**Concurrency Limit**:
+使用者透過 Settings 設定的整數，決定伺服器同時最多有幾個 Download Job 可以佔用執行名額（`queued`／`pending`／`downloading` 三個階段都算，`moving` 不算，因為前三者可能牽涉 headless Chromium 資源，`moving` 純粹是檔案搬移）。使用者未設定過時預設為 3；可隨時調整，調低不會中止已在執行中的 Download Job。
+_Avoid_: Max Downloads（容易誤解成「累計下載總數」而非「同時執行數」）
+
+**Queue**:
+因為 Concurrency Limit 已滿而尚未取得執行名額、狀態為 `queued` 的 Download Job 集合，依建立時間先進先出遞補名額。使用者可以取消還在 Queue 中、尚未真正開始執行的 Download Job；已取得名額執行中的則不可取消。
+_Avoid_: Waitlist, Backlog

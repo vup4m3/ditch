@@ -56,7 +56,7 @@ export class JobStore {
       candidateUrl: input.candidateUrl,
       filename: input.filename,
       destinationFolder: input.destinationFolder,
-      status: "pending",
+      status: input.initialStatus ?? "pending",
       progress: 0,
       errorMessage: null,
       outputPath: null,
@@ -96,6 +96,24 @@ export class JobStore {
       .run(progress, new Date().toISOString(), id);
   }
 
+  /** Promotes a queued job to pending once it acquires an execution slot (ADR-0009). */
+  markPending(id: string): void {
+    this.#db
+      .prepare(`UPDATE download_jobs SET status = 'pending', updatedAt = ? WHERE id = ?`)
+      .run(new Date().toISOString(), id);
+  }
+
+  /**
+   * Cancels a job still waiting in the Queue. No-ops once the job holds an execution slot
+   * (status is no longer "queued") — returns whether the cancellation actually applied (ADR-0009).
+   */
+  cancel(id: string): boolean {
+    const result = this.#db
+      .prepare(`UPDATE download_jobs SET status = 'cancelled', updatedAt = ? WHERE id = ? AND status = 'queued'`)
+      .run(new Date().toISOString(), id);
+    return Number(result.changes) > 0;
+  }
+
   /** Called once the file is fully written to cache and is being relocated to its final destination. */
   markMoving(id: string): void {
     this.#db
@@ -124,7 +142,35 @@ export class JobStore {
     return rows.map(rowToRecord);
   }
 
-  /** Called on server startup: recovers from jobs left mid-flight by a crash/restart (no resume — ADR/Q21). */
+  /** Number of jobs currently holding an execution slot (ADR-0009) — "queued" jobs don't count, they're waiting for one. */
+  countActive(): number {
+    const row = this.#db
+      .prepare(`SELECT COUNT(*) AS count FROM download_jobs WHERE status IN ('pending', 'downloading')`)
+      .get() as { count: number };
+    return row.count;
+  }
+
+  /** The longest-waiting "queued" job, if any, to promote once a slot frees up (ADR-0009). */
+  nextQueued(): DownloadJobRecord | undefined {
+    const row = this.#db
+      .prepare(`SELECT * FROM download_jobs WHERE status = 'queued' ORDER BY createdAt ASC, rowid ASC LIMIT 1`)
+      .get() as Row | undefined;
+    return row ? rowToRecord(row) : undefined;
+  }
+
+  /** All jobs currently sitting in the Queue, oldest first (ADR-0009). */
+  listQueued(): DownloadJobRecord[] {
+    const rows = this.#db
+      .prepare(`SELECT * FROM download_jobs WHERE status = 'queued' ORDER BY createdAt ASC, rowid ASC`)
+      .all() as unknown as Row[];
+    return rows.map(rowToRecord);
+  }
+
+  /**
+   * Called on server startup: recovers from jobs left mid-flight by a crash/restart (no resume — ADR/Q21).
+   * "queued" jobs are deliberately excluded — they haven't started any work yet, so they simply
+   * stay queued and re-acquire a slot once the server is back up (ADR-0009).
+   */
   failAllInProgress(errorMessage: string): void {
     this.#db
       .prepare(

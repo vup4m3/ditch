@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createApp } from "./api/app.ts";
 import { JobStore } from "./db/jobStore.ts";
+import { SettingsStore } from "./db/settingsStore.ts";
 import { runDetectionSession } from "./detection/session.ts";
 import { resolveSegments } from "./download/resolveSegments.ts";
 import { downloadToFile } from "./download/job.ts";
@@ -24,10 +25,22 @@ async function main() {
 
   const db = new DatabaseSync(DB_PATH);
   const jobStore = new JobStore(db);
+  const settingsStore = new SettingsStore(db);
   jobStore.failAllInProgress("伺服器重啟，任務中斷");
+
+  // Jobs still "queued" from before the restart survive (ADR-0009) but can't auto-resume this
+  // session — their candidate/headers only ever lived in memory, not in the DB. They'll sit in
+  // the queue until the user cancels and resubmits them.
+  const orphanedQueue = jobStore.listQueued();
+  if (orphanedQueue.length > 0) {
+    console.warn(
+      `${orphanedQueue.length} job(s) were still queued before restart and won't auto-resume: ${orphanedQueue.map((j) => j.id).join(", ")}`,
+    );
+  }
 
   const app = createApp({
     jobStore,
+    settingsStore,
     cacheDir: CACHE_DIR,
     downloadsDir: DOWNLOADS_DIR,
     runDetection: (pageUrl, onCandidate) => runDetectionSession(pageUrl, { onCandidate }),

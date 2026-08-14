@@ -4,14 +4,17 @@ import { join, basename } from "node:path";
 import { stat, access, mkdir, rm, readdir } from "node:fs/promises";
 import { SseChannel } from "./sseChannel.ts";
 import { JobStore } from "../db/jobStore.ts";
+import { SettingsStore } from "../db/settingsStore.ts";
 import { sanitizeDestinationFolder, sanitizeFolderName } from "../download/destinationFolder.ts";
 import type { Candidate } from "../detection/types.ts";
 import type { DetectionResult } from "../detection/session.ts";
+import type { DownloadJobRecord } from "../db/types.ts";
 import type { ManifestSegment } from "../download/manifest/types.ts";
 import type { DownloadProgress, DownloadRequestOptions } from "../download/job.ts";
 
 export interface AppDependencies {
   jobStore: JobStore;
+  settingsStore: SettingsStore;
   /** Fast local scratch space (e.g. an SSD) that segments are downloaded into first. */
   cacheDir: string;
   /** Final resting place for completed downloads (e.g. an NFS mount) — may be slow/high-latency. */
@@ -53,7 +56,77 @@ export function createApp(deps: AppDependencies): Express {
   app.use(express.json());
 
   const detections = new Map<string, DetectionEntry>();
-  const downloadChannels = new Map<string, SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>>();
+  const downloadChannels = new Map<
+    string,
+    SseChannel<{ type: "queued" | "progress" | "moving" | "done" | "error" | "cancelled"; data: unknown }>
+  >();
+  // What a queued/pending job needs to actually run, keyed by job id — set at creation time,
+  // dropped once the job leaves the system (moving/completed/failed/cancelled). Not persisted:
+  // a "queued" job surviving a server restart (ADR-0009) has no entry here, so it stays queued
+  // but won't auto-resume until the user cancels and resubmits it.
+  const jobWork = new Map<string, { candidate: Candidate; headers: DownloadRequestOptions }>();
+
+  /** Tells every still-queued job's subscriber where it now sits in line (1-based, oldest first). */
+  function broadcastQueuePositions(): void {
+    deps.jobStore.listQueued().forEach((job, index) => {
+      downloadChannels.get(job.id)?.publish({ type: "queued", data: { position: index + 1 } });
+    });
+  }
+
+  /** Fills free execution slots with the longest-waiting queued jobs (ADR-0009). */
+  function promoteQueued(): void {
+    let promoted = false;
+    while (deps.jobStore.countActive() < deps.settingsStore.getConcurrencyLimit()) {
+      const next = deps.jobStore.nextQueued();
+      if (!next) break;
+      const work = jobWork.get(next.id);
+      if (!work) break; // orphaned by a restart — no execution data to resume with
+      runJob(next, work);
+      promoted = true;
+    }
+    if (promoted) broadcastQueuePositions(); // jobs behind the promoted one moved up
+  }
+
+  function runJob(job: DownloadJobRecord, work: { candidate: Candidate; headers: DownloadRequestOptions }): void {
+    const { candidate, headers } = work;
+    const channel = downloadChannels.get(job.id)!;
+    deps.jobStore.markPending(job.id);
+
+    const cacheJobDir = join(deps.cacheDir, job.id);
+    const cachePath = join(cacheJobDir, job.filename);
+    const finalDir = join(deps.downloadsDir, job.destinationFolder);
+    const finalPath = join(finalDir, job.filename);
+
+    (async () => {
+      await mkdir(cacheJobDir, { recursive: true });
+      const segments = await deps.resolveSegments(candidate, headers);
+      await deps.downloadToFile(segments, cachePath, headers, (progress) => {
+        const fraction = progress.totalSegments > 0 ? progress.completedSegments / progress.totalSegments : 0;
+        deps.jobStore.updateProgress(job.id, fraction);
+        channel.publish({ type: "progress", data: progress });
+      });
+
+      deps.jobStore.markMoving(job.id);
+      channel.publish({ type: "moving", data: {} });
+      jobWork.delete(job.id);
+      promoteQueued(); // downloading -> moving frees this job's slot
+
+      await mkdir(finalDir, { recursive: true });
+      await deps.relocateFile(cachePath, finalPath);
+      await rm(cacheJobDir, { recursive: true, force: true });
+
+      deps.jobStore.markCompleted(job.id, finalPath);
+      channel.publish({ type: "done", data: { outputPath: finalPath } });
+      channel.close();
+    })().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      deps.jobStore.markFailed(job.id, message);
+      channel.publish({ type: "error", data: { message } });
+      channel.close();
+      jobWork.delete(job.id);
+      promoteQueued(); // failure before reaching moving also frees a slot
+    });
+  }
 
   app.post("/api/detections", (req, res) => {
     const pageUrl = req.body?.pageUrl;
@@ -169,42 +242,56 @@ export function createApp(deps: AppDependencies): Express {
       cookie: entry.result?.cookie,
       userAgent: entry.result?.userAgent,
     };
+    const hasFreeSlot = deps.jobStore.countActive() < deps.settingsStore.getConcurrencyLimit();
     const job = deps.jobStore.create({
       sourcePageUrl: entry.result?.referer ?? "",
       candidateUrl: candidate.url,
       filename: sanitizedFilename,
       destinationFolder,
+      initialStatus: hasFreeSlot ? "pending" : "queued",
     });
-    const channel = new SseChannel<{ type: "progress" | "moving" | "done" | "error"; data: unknown }>();
+    const channel = new SseChannel<{ type: "queued" | "progress" | "moving" | "done" | "error" | "cancelled"; data: unknown }>();
     downloadChannels.set(job.id, channel);
-    res.status(202).json({ id: job.id });
+    jobWork.set(job.id, { candidate, headers });
+    const queuePosition = hasFreeSlot ? undefined : deps.jobStore.listQueued().length;
+    res.status(202).json({ id: job.id, status: job.status, queuePosition });
 
-    const cacheJobDir = join(deps.cacheDir, job.id);
-    const cachePath = join(cacheJobDir, job.filename);
-    (async () => {
-      await mkdir(cacheJobDir, { recursive: true });
-      const segments = await deps.resolveSegments(candidate, headers);
-      await deps.downloadToFile(segments, cachePath, headers, (progress) => {
-        const fraction = progress.totalSegments > 0 ? progress.completedSegments / progress.totalSegments : 0;
-        deps.jobStore.updateProgress(job.id, fraction);
-        channel.publish({ type: "progress", data: progress });
-      });
+    if (hasFreeSlot) {
+      runJob(job, { candidate, headers });
+    }
+  });
 
-      deps.jobStore.markMoving(job.id);
-      channel.publish({ type: "moving", data: {} });
-      await mkdir(finalDir, { recursive: true });
-      await deps.relocateFile(cachePath, finalPath);
-      await rm(cacheJobDir, { recursive: true, force: true });
+  app.delete("/api/downloads/:id", (req, res) => {
+    const id = req.params.id!;
+    const cancelled = deps.jobStore.cancel(id);
+    if (!cancelled) {
+      const job = deps.jobStore.get(id);
+      res.status(job ? 409 : 404).json({ error: job ? "not_queued" : "not_found" });
+      return;
+    }
+    jobWork.delete(id);
+    const channel = downloadChannels.get(id);
+    channel?.publish({ type: "cancelled", data: {} });
+    channel?.close();
+    downloadChannels.delete(id);
+    broadcastQueuePositions(); // jobs behind the cancelled one moved up
+    res.status(200).json({ ok: true });
+  });
 
-      deps.jobStore.markCompleted(job.id, finalPath);
-      channel.publish({ type: "done", data: { outputPath: finalPath } });
-      channel.close();
-    })().catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      deps.jobStore.markFailed(job.id, message);
-      channel.publish({ type: "error", data: { message } });
-      channel.close();
-    });
+  app.get("/api/settings", (_req, res) => {
+    res.json({ concurrencyLimit: deps.settingsStore.getConcurrencyLimit() });
+  });
+
+  app.put("/api/settings", (req, res) => {
+    const { concurrencyLimit } = req.body ?? {};
+    try {
+      deps.settingsStore.setConcurrencyLimit(concurrencyLimit);
+    } catch {
+      res.status(400).json({ error: "invalid_concurrency_limit" });
+      return;
+    }
+    promoteQueued(); // a higher limit may free up slots for jobs already waiting
+    res.json({ concurrencyLimit: deps.settingsStore.getConcurrencyLimit() });
   });
 
   app.get("/api/downloads", (_req, res) => {
@@ -224,11 +311,13 @@ export function createApp(deps: AppDependencies): Express {
       return;
     }
     // No live channel (e.g. server restarted) — report final DB state as a single event.
-    const fallback = new SseChannel<{ type: "progress" | "done" | "error"; data: unknown }>();
+    const fallback = new SseChannel<{ type: "progress" | "done" | "error" | "cancelled"; data: unknown }>();
     if (job.status === "completed") {
       fallback.publish({ type: "done", data: { outputPath: job.outputPath } });
     } else if (job.status === "failed") {
       fallback.publish({ type: "error", data: { message: job.errorMessage } });
+    } else if (job.status === "cancelled") {
+      fallback.publish({ type: "cancelled", data: {} });
     }
     fallback.close();
     fallback.subscribe(res);

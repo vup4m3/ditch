@@ -43,6 +43,80 @@ test("create() persists a nested destinationFolder (ADR-0008)", () => {
   assert.equal(store.get(job.id)!.destinationFolder, "電影/2024");
 });
 
+test("create() defaults to pending when initialStatus is omitted", () => {
+  const store = makeStore();
+
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+  });
+
+  assert.equal(job.status, "pending");
+});
+
+test("create() honors initialStatus: queued (ADR-0009)", () => {
+  const store = makeStore();
+
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+
+  assert.equal(job.status, "queued");
+  assert.equal(store.get(job.id)!.status, "queued");
+});
+
+test("markPending() promotes a queued job to pending", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+
+  store.markPending(job.id);
+
+  assert.equal(store.get(job.id)!.status, "pending");
+});
+
+test("cancel() cancels a queued job and reports success", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+
+  const cancelled = store.cancel(job.id);
+
+  assert.equal(cancelled, true);
+  assert.equal(store.get(job.id)!.status, "cancelled");
+});
+
+test("cancel() no-ops once a job has left queued, reporting failure", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+  });
+
+  const cancelled = store.cancel(job.id);
+
+  assert.equal(cancelled, false);
+  assert.equal(store.get(job.id)!.status, "pending");
+});
+
 test("get() retrieves a previously created job by id", () => {
   const store = makeStore();
   const created = store.create({
@@ -147,6 +221,21 @@ test("list() returns jobs most-recently-created first", () => {
   assert.equal(jobs.length, 2);
   assert.equal(jobs[0]!.id, second.id);
   assert.equal(jobs[1]!.id, first.id);
+});
+
+test("failAllInProgress() leaves queued jobs untouched (ADR-0009)", () => {
+  const store = makeStore();
+  const queued = store.create({
+    sourcePageUrl: "https://example.com/a",
+    candidateUrl: "https://example.com/a.m3u8",
+    filename: "a.ts",
+    destinationFolder: "",
+    initialStatus: "queued",
+  });
+
+  store.failAllInProgress("interrupted by server restart");
+
+  assert.equal(store.get(queued.id)!.status, "queued");
 });
 
 test("failAllInProgress() marks pending, downloading, and moving jobs as failed, leaving completed/failed jobs untouched", () => {

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createApp, type AppDependencies } from "./app.ts";
 import { JobStore } from "../db/jobStore.ts";
+import { SettingsStore } from "../db/settingsStore.ts";
 import { relocateFile } from "../download/relocateFile.ts";
 import type { Candidate } from "../detection/types.ts";
 
@@ -72,9 +73,12 @@ const CANDIDATE: Candidate = {
 };
 
 function makeDeps({ cacheDir, downloadsDir }: TestDirs, overrides: Partial<AppDependencies> = {}): AppDependencies {
-  const jobStore = new JobStore(new DatabaseSync(":memory:"));
+  const db = new DatabaseSync(":memory:");
+  const jobStore = new JobStore(db);
+  const settingsStore = new SettingsStore(db);
   return {
     jobStore,
+    settingsStore,
     cacheDir,
     downloadsDir,
     runDetection: async (pageUrl, onCandidate) => {
@@ -394,6 +398,298 @@ test("GET /api/folders lists immediate subfolders of a path, and 404s for a path
 
       const missingRes = await fetch(`${baseUrl}/api/folders?path=${encodeURIComponent("不存在")}`);
       assert.equal(missingRes.status, 404);
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("GET /api/settings defaults to a concurrency limit of 3, PUT updates it, and rejects invalid values (ADR-0009)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      const defaultRes = await fetch(`${baseUrl}/api/settings`);
+      assert.equal(defaultRes.status, 200);
+      assert.deepEqual(await defaultRes.json(), { concurrencyLimit: 3 });
+
+      const putRes = await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 7 }),
+      });
+      assert.equal(putRes.status, 200);
+      assert.deepEqual(await putRes.json(), { concurrencyLimit: 7 });
+      assert.deepEqual(await (await fetch(`${baseUrl}/api/settings`)).json(), { concurrencyLimit: 7 });
+
+      const invalidRes = await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 0 }),
+      });
+      assert.equal(invalidRes.status, 400);
+      assert.deepEqual(
+        await (await fetch(`${baseUrl}/api/settings`)).json(),
+        { concurrencyLimit: 7 },
+        "a rejected update must not overwrite the previously valid setting",
+      );
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("queues a download once the concurrency limit is reached, and starts it once a slot frees up (ADR-0009)", async () => {
+  await withTempDirs(async (dirs) => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let started = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          started++;
+          if (started === 1) await firstGate;
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, `bytes-${started}`);
+        },
+      }),
+    );
+    try {
+      const putRes = await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 1 }),
+      });
+      assert.equal(putRes.status, 200);
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const firstRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "a.ts" }),
+      });
+      const { id: firstJobId, status: firstStatus } = (await firstRes.json()) as { id: string; status: string };
+      assert.equal(firstStatus, "pending", "with a free slot the first job should start right away");
+
+      const secondRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "b.ts" }),
+      });
+      const {
+        id: secondJobId,
+        status: secondStatus,
+        queuePosition,
+      } = (await secondRes.json()) as { id: string; status: string; queuePosition: number };
+      assert.equal(secondStatus, "queued", "with the limit already held, the second job should wait in the Queue");
+      assert.equal(queuePosition, 1, "it's the only job waiting, so it's first in line");
+
+      const jobsWhileWaiting = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobsWhileWaiting.find((j) => j.id === secondJobId)?.status, "queued");
+      assert.equal(started, 1, "the queued job's downloadToFile must not have been invoked yet");
+
+      releaseFirst();
+      await readSse(baseUrl, `/api/downloads/${firstJobId}/events`, 3);
+      await readSse(baseUrl, `/api/downloads/${secondJobId}/events`, 3);
+
+      const jobsAfter = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobsAfter.find((j) => j.id === firstJobId)?.status, "completed");
+      assert.equal(jobsAfter.find((j) => j.id === secondJobId)?.status, "completed");
+      assert.equal(started, 2, "the second job should have started once the first freed its slot");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("raising the concurrency limit immediately promotes a waiting queued job (ADR-0009)", async () => {
+  await withTempDirs(async (dirs) => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let started = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          started++;
+          if (started === 1) await firstGate;
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, `bytes-${started}`);
+        },
+      }),
+    );
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 1 }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "a.ts" }),
+      });
+      const secondRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "b.ts" }),
+      });
+      const { id: secondJobId } = (await secondRes.json()) as { id: string };
+      assert.equal(started, 1, "the second job should still be waiting, first job's gate not yet released");
+
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 2 }),
+      });
+
+      // both jobs now hold a slot: the still-gated first, and the newly-promoted second (which,
+      // unblocked from the start, may already have raced ahead to "downloading").
+      const jobsAfterRaise = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.notEqual(jobsAfterRaise.find((j) => j.id === secondJobId)?.status, "queued");
+
+      releaseFirst();
+      await readSse(baseUrl, `/api/downloads/${secondJobId}/events`, 3);
+      const jobsAfter = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobsAfter.find((j) => j.id === secondJobId)?.status, "completed");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("DELETE /api/downloads/:id cancels a queued job, refuses an active one, and 404s for an unknown id", async () => {
+  await withTempDirs(async (dirs) => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let started = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          started++;
+          if (started === 1) await firstGate;
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, `bytes-${started}`);
+        },
+      }),
+    );
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 1 }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const firstRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "a.ts" }),
+      });
+      const { id: firstJobId } = (await firstRes.json()) as { id: string };
+
+      const secondRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "b.ts" }),
+      });
+      const { id: secondJobId } = (await secondRes.json()) as { id: string };
+
+      const activeCancelRes = await fetch(`${baseUrl}/api/downloads/${firstJobId}`, { method: "DELETE" });
+      assert.equal(activeCancelRes.status, 409, "a job already holding an execution slot cannot be cancelled");
+
+      const missingCancelRes = await fetch(`${baseUrl}/api/downloads/does-not-exist`, { method: "DELETE" });
+      assert.equal(missingCancelRes.status, 404);
+
+      const queuedCancelRes = await fetch(`${baseUrl}/api/downloads/${secondJobId}`, { method: "DELETE" });
+      assert.equal(queuedCancelRes.status, 200);
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobs.find((j) => j.id === secondJobId)?.status, "cancelled");
+
+      releaseFirst();
+      await readSse(baseUrl, `/api/downloads/${firstJobId}/events`, 3);
+      assert.equal(started, 1, "cancelling the queued job must not have started it");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("queue positions shift down for jobs behind one that gets cancelled (ADR-0009)", async () => {
+  await withTempDirs(async (dirs) => {
+    const neverResolves = new Promise<void>(() => {});
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        downloadToFile: async (_segments, outputPath, _options, onProgress) => {
+          onProgress?.({ completedSegments: 1, totalSegments: 1 });
+          await writeFile(outputPath, "bytes-1");
+          await neverResolves; // keep the only slot held so the queue never drains on its own
+        },
+      }),
+    );
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ concurrencyLimit: 1 }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const postDownload = (filename: string) =>
+        fetch(`${baseUrl}/api/downloads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename }),
+        }).then((res) => res.json() as Promise<{ id: string; status: string; queuePosition?: number }>);
+
+      await postDownload("a.ts"); // holds the only slot
+      const second = await postDownload("b.ts");
+      const third = await postDownload("c.ts");
+      assert.equal(second.queuePosition, 1);
+      assert.equal(third.queuePosition, 2);
+
+      const thirdEventsPromise = readSse(baseUrl, `/api/downloads/${third.id}/events`, 1);
+      const cancelRes = await fetch(`${baseUrl}/api/downloads/${second.id}`, { method: "DELETE" });
+      assert.equal(cancelRes.status, 200);
+
+      const thirdEvents = await thirdEventsPromise;
+      assert.equal(thirdEvents[0]?.type, "queued");
+      assert.equal((thirdEvents[0]?.data as { position: number }).position, 1, "moved up now that job b was cancelled");
     } finally {
       await close();
     }
