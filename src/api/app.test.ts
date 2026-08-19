@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, mkdir, rm, writeFile, readFile, access } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, access, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -91,6 +91,15 @@ function makeDeps({ cacheDir, downloadsDir }: TestDirs, overrides: Partial<AppDe
       await writeFile(outputPath, "fake-video-bytes");
     },
     relocateFile,
+    // A fake ffmpeg: just copies the pre-transcode bytes through, reporting one progress tick.
+    // Tests exercising real cancel-mid-transcode semantics override this with a gated version.
+    transcode: (inputPath, outputPath, totalDurationSeconds, onProgress) => {
+      const done = (async () => {
+        onProgress?.({ encodedSeconds: totalDurationSeconds, totalSeconds: totalDurationSeconds });
+        await copyFile(inputPath, outputPath);
+      })();
+      return { done, cancel: () => {} };
+    },
     ...overrides,
   };
 }
@@ -475,9 +484,10 @@ test("GET /api/settings defaults to a concurrency limit of 3, PUT updates it, an
   await withTempDirs(async (dirs) => {
     const { baseUrl, close } = await startApp(makeDeps(dirs));
     try {
+      const defaults = { concurrencyLimit: 3, transcodeEnabled: false, transcodeConcurrencyLimit: 1 };
       const defaultRes = await fetch(`${baseUrl}/api/settings`);
       assert.equal(defaultRes.status, 200);
-      assert.deepEqual(await defaultRes.json(), { concurrencyLimit: 3 });
+      assert.deepEqual(await defaultRes.json(), defaults);
 
       const putRes = await fetch(`${baseUrl}/api/settings`, {
         method: "PUT",
@@ -485,8 +495,8 @@ test("GET /api/settings defaults to a concurrency limit of 3, PUT updates it, an
         body: JSON.stringify({ concurrencyLimit: 7 }),
       });
       assert.equal(putRes.status, 200);
-      assert.deepEqual(await putRes.json(), { concurrencyLimit: 7 });
-      assert.deepEqual(await (await fetch(`${baseUrl}/api/settings`)).json(), { concurrencyLimit: 7 });
+      assert.deepEqual(await putRes.json(), { ...defaults, concurrencyLimit: 7 });
+      assert.deepEqual(await (await fetch(`${baseUrl}/api/settings`)).json(), { ...defaults, concurrencyLimit: 7 });
 
       const invalidRes = await fetch(`${baseUrl}/api/settings`, {
         method: "PUT",
@@ -496,9 +506,38 @@ test("GET /api/settings defaults to a concurrency limit of 3, PUT updates it, an
       assert.equal(invalidRes.status, 400);
       assert.deepEqual(
         await (await fetch(`${baseUrl}/api/settings`)).json(),
-        { concurrencyLimit: 7 },
+        { ...defaults, concurrencyLimit: 7 },
         "a rejected update must not overwrite the previously valid setting",
       );
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("PUT /api/settings updates transcodeEnabled and transcodeConcurrencyLimit independently of concurrencyLimit (ADR-0012, ADR-0013)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      const putRes = await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcodeEnabled: true, transcodeConcurrencyLimit: 2 }),
+      });
+      assert.equal(putRes.status, 200);
+      assert.deepEqual(await putRes.json(), { concurrencyLimit: 3, transcodeEnabled: true, transcodeConcurrencyLimit: 2 });
+
+      const invalidRes = await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcodeConcurrencyLimit: 0 }),
+      });
+      assert.equal(invalidRes.status, 400);
+      assert.deepEqual(await (await fetch(`${baseUrl}/api/settings`)).json(), {
+        concurrencyLimit: 3,
+        transcodeEnabled: true,
+        transcodeConcurrencyLimit: 2,
+      });
     } finally {
       await close();
     }
@@ -813,6 +852,201 @@ test("queue positions shift down for jobs behind one that gets cancelled (ADR-00
       const thirdEvents = await thirdEventsPromise;
       assert.equal(thirdEvents[0]?.type, "queued");
       assert.equal((thirdEvents[0]?.data as { position: number }).position, 1, "moved up now that job b was cancelled");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("a transcodeEnabled download forces a .mkv filename and runs through transcoding before completing (ADR-0012)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcodeEnabled: true }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const downloadRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: "my video.ts" }),
+      });
+      assert.equal(downloadRes.status, 202);
+      const { id: jobId } = (await downloadRes.json()) as { id: string };
+
+      // "transcoding" fires twice: once immediately on acquiring the slot, once from the fake
+      // ffmpeg's own progress tick.
+      const events = await readSse(baseUrl, `/api/downloads/${jobId}/events`, 5);
+      assert.deepEqual(events.map((e) => e.type), ["progress", "transcoding", "transcoding", "moving", "done"]);
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{
+        id: string;
+        status: string;
+        filename: string;
+        transcodeEnabled: boolean;
+        outputPath: string;
+      }>;
+      const job = jobs.find((j) => j.id === jobId)!;
+      assert.equal(job.status, "completed");
+      assert.equal(job.filename, "my video.mkv", "the .ts extension the user typed is forced to .mkv (Q9)");
+      assert.equal(job.transcodeEnabled, true);
+      assert.equal(job.outputPath, join(dirs.downloadsDir, "my video.mkv"));
+
+      // the pre-transcode raw file and the whole cache dir are both cleaned up (Q5)
+      await assert.rejects(access(join(dirs.cacheDir, jobId)));
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("waits in the Transcode Queue when the transcode concurrency limit is reached, then promotes (ADR-0013)", async () => {
+  await withTempDirs(async (dirs) => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let transcodeStarted = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        transcode: (inputPath, outputPath, totalDurationSeconds, onProgress) => {
+          transcodeStarted++;
+          const startedAt = transcodeStarted;
+          const done = (async () => {
+            if (startedAt === 1) await firstGate;
+            onProgress?.({ encodedSeconds: totalDurationSeconds, totalSeconds: totalDurationSeconds });
+            await copyFile(inputPath, outputPath);
+          })();
+          return { done, cancel: () => {} };
+        },
+      }),
+    );
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcodeEnabled: true, transcodeConcurrencyLimit: 1 }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const postDownload = (filename: string) =>
+        fetch(`${baseUrl}/api/downloads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename }),
+        }).then((res) => res.json() as Promise<{ id: string }>);
+
+      const first = await postDownload("a.ts");
+      const second = await postDownload("b.ts");
+
+      // first job reaches transcoding and holds the only transcode slot (gated); second waits behind it
+      await readSse(baseUrl, `/api/downloads/${first.id}/events`, 2); // progress, transcoding
+      const secondEvents = await readSse(baseUrl, `/api/downloads/${second.id}/events`, 2); // progress, transcodeQueued
+      assert.equal(secondEvents[1]?.type, "transcodeQueued");
+      assert.equal((secondEvents[1]?.data as { position: number }).position, 1);
+      assert.equal(transcodeStarted, 1, "the transcode-queued job's ffmpeg must not have been invoked yet");
+
+      releaseFirst();
+      // "transcoding" fires twice per job: once on acquiring the slot, once from the fake
+      // ffmpeg's own progress tick.
+      await readSse(baseUrl, `/api/downloads/${first.id}/events`, 5); // progress, transcoding x2, moving, done
+      await readSse(baseUrl, `/api/downloads/${second.id}/events`, 6); // progress, transcodeQueued, transcoding x2, moving, done
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobs.find((j) => j.id === first.id)?.status, "completed");
+      assert.equal(jobs.find((j) => j.id === second.id)?.status, "completed");
+      assert.equal(transcodeStarted, 2, "the second job's ffmpeg should have started once the first freed its slot");
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("DELETE cancels a job waiting in the Transcode Queue, and a job actively transcoding by killing its ffmpeg process (ADR-0013)", async () => {
+  await withTempDirs(async (dirs) => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let cancelCalls = 0;
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        transcode: (inputPath, outputPath, totalDurationSeconds, onProgress) => {
+          let cancelled = false;
+          const done = (async () => {
+            await firstGate;
+            if (cancelled) throw new Error("killed by SIGTERM");
+            onProgress?.({ encodedSeconds: totalDurationSeconds, totalSeconds: totalDurationSeconds });
+            await copyFile(inputPath, outputPath);
+          })();
+          return {
+            done,
+            cancel: () => {
+              cancelled = true;
+              cancelCalls++;
+              releaseFirst(); // simulate the killed process's stream ending
+            },
+          };
+        },
+      }),
+    );
+    try {
+      await fetch(`${baseUrl}/api/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ transcodeEnabled: true, transcodeConcurrencyLimit: 1 }),
+      });
+
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const postDownload = (filename: string) =>
+        fetch(`${baseUrl}/api/downloads`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename }),
+        }).then((res) => res.json() as Promise<{ id: string }>);
+
+      const first = await postDownload("a.ts");
+      const second = await postDownload("b.ts");
+
+      await readSse(baseUrl, `/api/downloads/${first.id}/events`, 2); // progress, transcoding — holds the only (gated) slot
+      const secondEvents = await readSse(baseUrl, `/api/downloads/${second.id}/events`, 2); // progress, transcodeQueued
+      assert.equal(secondEvents[1]?.type, "transcodeQueued");
+
+      const cancelQueuedRes = await fetch(`${baseUrl}/api/downloads/${second.id}`, { method: "DELETE" });
+      assert.equal(cancelQueuedRes.status, 200);
+      assert.equal(cancelCalls, 0, "a job still waiting in the Transcode Queue never held an ffmpeg process to kill");
+
+      const cancelActiveRes = await fetch(`${baseUrl}/api/downloads/${first.id}`, { method: "DELETE" });
+      assert.equal(cancelActiveRes.status, 200);
+      assert.equal(cancelCalls, 1, "the running ffmpeg process was killed");
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ id: string; status: string }>;
+      assert.equal(jobs.find((j) => j.id === first.id)?.status, "cancelled");
+      assert.equal(jobs.find((j) => j.id === second.id)?.status, "cancelled");
     } finally {
       await close();
     }

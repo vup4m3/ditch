@@ -4,6 +4,15 @@ const CONCURRENCY_LIMIT_KEY = "concurrencyLimit";
 // Used until the user sets one via the Settings UI (ADR-0009).
 const DEFAULT_CONCURRENCY_LIMIT = 3;
 
+const TRANSCODE_ENABLED_KEY = "transcodeEnabled";
+// Off by default: transcoding requires ffmpeg in the runtime image, and every existing
+// deployment predates this feature (ADR-0012) — opt in explicitly via the Settings UI.
+const DEFAULT_TRANSCODE_ENABLED = false;
+
+const TRANSCODE_CONCURRENCY_LIMIT_KEY = "transcodeConcurrencyLimit";
+// AV1 software encoding is CPU-heavy; default conservatively to one at a time (ADR-0013).
+const DEFAULT_TRANSCODE_CONCURRENCY_LIMIT = 1;
+
 interface Row {
   value: string;
 }
@@ -44,5 +53,28 @@ export class SettingsStore {
       throw new Error("concurrency limit must be an integer >= 1");
     }
     this.#set(CONCURRENCY_LIMIT_KEY, String(limit));
+  }
+
+  /** Whether newly-created Download Jobs transcode to MKV/AV1 (ADR-0012). Frozen per-job at creation. */
+  getTranscodeEnabled(): boolean {
+    const raw = this.#get(TRANSCODE_ENABLED_KEY);
+    return raw !== undefined ? raw === "true" : DEFAULT_TRANSCODE_ENABLED;
+  }
+
+  setTranscodeEnabled(enabled: boolean): void {
+    this.#set(TRANSCODE_ENABLED_KEY, enabled ? "true" : "false");
+  }
+
+  /** Max number of Download Jobs allowed to hold a transcode slot (transcodeQueued/transcoding) at once (ADR-0013). */
+  getTranscodeConcurrencyLimit(): number {
+    const raw = this.#get(TRANSCODE_CONCURRENCY_LIMIT_KEY);
+    return raw !== undefined ? Number(raw) : DEFAULT_TRANSCODE_CONCURRENCY_LIMIT;
+  }
+
+  setTranscodeConcurrencyLimit(limit: number): void {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error("transcode concurrency limit must be an integer >= 1");
+    }
+    this.#set(TRANSCODE_CONCURRENCY_LIMIT_KEY, String(limit));
   }
 }

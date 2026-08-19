@@ -14,6 +14,8 @@ const deleteSelectedButton = document.getElementById("delete-selected-button");
 
 const settingsForm = document.getElementById("settings-form");
 const concurrencyLimitInput = document.getElementById("concurrency-limit-input");
+const transcodeEnabledInput = document.getElementById("transcode-enabled-input");
+const transcodeConcurrencyLimitInput = document.getElementById("transcode-concurrency-limit-input");
 const settingsStatus = document.getElementById("settings-status");
 
 const folderModalOverlay = document.getElementById("folder-modal-overlay");
@@ -126,8 +128,10 @@ async function loadSettings() {
   try {
     const res = await fetch("/api/settings");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { concurrencyLimit } = await res.json();
+    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = await res.json();
     concurrencyLimitInput.value = concurrencyLimit;
+    transcodeEnabledInput.checked = transcodeEnabled;
+    transcodeConcurrencyLimitInput.value = transcodeConcurrencyLimit;
   } catch (err) {
     setSettingsStatus(`載入設定失敗：${err.message}`, true);
   }
@@ -139,11 +143,17 @@ settingsForm.addEventListener("submit", async (event) => {
     const res = await fetch("/api/settings", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ concurrencyLimit: Number(concurrencyLimitInput.value) }),
+      body: JSON.stringify({
+        concurrencyLimit: Number(concurrencyLimitInput.value),
+        transcodeEnabled: transcodeEnabledInput.checked,
+        transcodeConcurrencyLimit: Number(transcodeConcurrencyLimitInput.value),
+      }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { concurrencyLimit } = await res.json();
+    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = await res.json();
     concurrencyLimitInput.value = concurrencyLimit;
+    transcodeEnabledInput.checked = transcodeEnabled;
+    transcodeConcurrencyLimitInput.value = transcodeConcurrencyLimit;
     setSettingsStatus("已儲存", false);
   } catch (err) {
     setSettingsStatus(`儲存失敗：${err.message}`, true);
@@ -409,7 +419,27 @@ async function startDownload(candidate, filename, destinationFolder = "", overwr
     const pct = data.totalSegments > 0 ? Math.round((data.completedSegments / data.totalSegments) * 100) : 0;
     fill.style.width = `${pct}%`;
   });
+  source.addEventListener("transcodeQueued", (e) => {
+    // Unlike the download Queue, waiting (or actively transcoding) can be cancelled (ADR-0013).
+    cancelButton.hidden = false;
+    const { position } = JSON.parse(e.data);
+    label.textContent = position
+      ? `${filename}（等待轉檔中，第 ${position} 位）`
+      : `${filename}（等待轉檔中）`;
+  });
+  source.addEventListener("transcoding", (e) => {
+    cancelButton.hidden = false;
+    const data = JSON.parse(e.data);
+    if (data.totalSeconds > 0) {
+      const pct = Math.round((data.encodedSeconds / data.totalSeconds) * 100);
+      fill.style.width = `${pct}%`;
+      label.textContent = `${filename}（轉檔中 ${pct}%…）`;
+    } else {
+      label.textContent = `${filename}（轉檔中…）`;
+    }
+  });
   source.addEventListener("moving", () => {
+    cancelButton.hidden = true; // holding the transcode slot is over; moving isn't cancellable
     fill.style.width = "100%";
     label.textContent = `${filename}（搬移到目的地中…）`;
   });
@@ -437,6 +467,8 @@ function statusLabel(status) {
       queued: "排隊中",
       pending: "等待中",
       downloading: "下載中",
+      transcodeQueued: "等待轉檔中",
+      transcoding: "轉檔中",
       moving: "搬移到目的地中",
       completed: "已完成",
       failed: "失敗",

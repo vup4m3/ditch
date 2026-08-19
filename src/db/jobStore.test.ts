@@ -43,6 +43,28 @@ test("create() persists a nested destinationFolder (ADR-0008)", () => {
   assert.equal(store.get(job.id)!.destinationFolder, "電影/2024");
 });
 
+test("create() defaults transcodeEnabled to false when omitted, and persists it when set (ADR-0012)", () => {
+  const store = makeStore();
+
+  const withoutFlag = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.ts",
+    destinationFolder: "",
+  });
+  assert.equal(withoutFlag.transcodeEnabled, false);
+
+  const withFlag = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  assert.equal(withFlag.transcodeEnabled, true);
+  assert.equal(store.get(withFlag.id)!.transcodeEnabled, true);
+});
+
 test("create() defaults to pending when initialStatus is omitted", () => {
   const store = makeStore();
 
@@ -168,6 +190,106 @@ test("markMoving() sets status to moving", () => {
   assert.equal(fetched.status, "moving");
 });
 
+test("updateTranscodeProgress() records progress under status transcoding, not downloading", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscoding(job.id);
+
+  store.updateTranscodeProgress(job.id, 0.5);
+  const fetched = store.get(job.id)!;
+
+  assert.equal(fetched.status, "transcoding");
+  assert.equal(fetched.progress, 0.5);
+});
+
+test("markTranscodeQueued() then markTranscoding() move status through the Transcode Queue (ADR-0013)", () => {
+  const store = makeStore();
+  const job = store.create({
+    sourcePageUrl: "https://example.com/live",
+    candidateUrl: "https://example.com/live/hi/index.m3u8",
+    filename: "my-video.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+
+  store.markTranscodeQueued(job.id);
+  assert.equal(store.get(job.id)!.status, "transcodeQueued");
+
+  store.markTranscoding(job.id);
+  assert.equal(store.get(job.id)!.status, "transcoding");
+});
+
+test("cancelTranscode() cancels a job in transcodeQueued or transcoding, and no-ops otherwise (ADR-0013)", () => {
+  const store = makeStore();
+  const queued = store.create({
+    sourcePageUrl: "https://example.com/a",
+    candidateUrl: "https://example.com/a.m3u8",
+    filename: "a.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscodeQueued(queued.id);
+  assert.equal(store.cancelTranscode(queued.id), true);
+  assert.equal(store.get(queued.id)!.status, "cancelled");
+
+  const transcoding = store.create({
+    sourcePageUrl: "https://example.com/b",
+    candidateUrl: "https://example.com/b.m3u8",
+    filename: "b.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscoding(transcoding.id);
+  assert.equal(store.cancelTranscode(transcoding.id), true);
+  assert.equal(store.get(transcoding.id)!.status, "cancelled");
+
+  const pending = store.create({
+    sourcePageUrl: "https://example.com/c",
+    candidateUrl: "https://example.com/c.m3u8",
+    filename: "c.ts",
+    destinationFolder: "",
+  });
+  assert.equal(store.cancelTranscode(pending.id), false);
+  assert.equal(store.get(pending.id)!.status, "pending");
+});
+
+test("countActiveTranscode(), nextTranscodeQueued(), and listTranscodeQueued() track the Transcode Queue (ADR-0013)", () => {
+  const store = makeStore();
+  const first = store.create({
+    sourcePageUrl: "https://example.com/a",
+    candidateUrl: "https://example.com/a.m3u8",
+    filename: "a.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  const second = store.create({
+    sourcePageUrl: "https://example.com/b",
+    candidateUrl: "https://example.com/b.m3u8",
+    filename: "b.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscodeQueued(first.id);
+  store.markTranscodeQueued(second.id);
+
+  assert.equal(store.countActiveTranscode(), 0, "transcodeQueued jobs don't hold a slot");
+  assert.equal(store.nextTranscodeQueued()!.id, first.id, "oldest first");
+  assert.deepEqual(
+    store.listTranscodeQueued().map((j) => j.id),
+    [first.id, second.id],
+  );
+
+  store.markTranscoding(first.id);
+  assert.equal(store.countActiveTranscode(), 1, "transcoding jobs hold a slot");
+  assert.equal(store.nextTranscodeQueued()!.id, second.id);
+});
+
 test("markCompleted() sets status completed, progress 1, and the output path", () => {
   const store = makeStore();
   const created = store.create({
@@ -223,7 +345,7 @@ test("list() returns jobs most-recently-created first", () => {
   assert.equal(jobs[1]!.id, first.id);
 });
 
-test("failAllInProgress() leaves queued jobs untouched (ADR-0009)", () => {
+test("failAllInProgress() leaves queued and transcodeQueued jobs untouched (ADR-0009, ADR-0013)", () => {
   const store = makeStore();
   const queued = store.create({
     sourcePageUrl: "https://example.com/a",
@@ -232,13 +354,22 @@ test("failAllInProgress() leaves queued jobs untouched (ADR-0009)", () => {
     destinationFolder: "",
     initialStatus: "queued",
   });
+  const transcodeQueued = store.create({
+    sourcePageUrl: "https://example.com/e",
+    candidateUrl: "https://example.com/e.m3u8",
+    filename: "e.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscodeQueued(transcodeQueued.id);
 
   store.failAllInProgress("interrupted by server restart");
 
   assert.equal(store.get(queued.id)!.status, "queued");
+  assert.equal(store.get(transcodeQueued.id)!.status, "transcodeQueued");
 });
 
-test("failAllInProgress() marks pending, downloading, and moving jobs as failed, leaving completed/failed jobs untouched", () => {
+test("failAllInProgress() marks pending, downloading, transcoding, and moving jobs as failed, leaving completed/failed jobs untouched", () => {
   const store = makeStore();
   const pending = store.create({
     sourcePageUrl: "https://example.com/a",
@@ -253,6 +384,14 @@ test("failAllInProgress() marks pending, downloading, and moving jobs as failed,
     destinationFolder: "",
   });
   store.updateProgress(downloading.id, 0.5);
+  const transcoding = store.create({
+    sourcePageUrl: "https://example.com/e",
+    candidateUrl: "https://example.com/e.m3u8",
+    filename: "e.mkv",
+    destinationFolder: "",
+    transcodeEnabled: true,
+  });
+  store.markTranscoding(transcoding.id);
   const moving = store.create({
     sourcePageUrl: "https://example.com/d",
     candidateUrl: "https://example.com/d.m3u8",
@@ -273,6 +412,7 @@ test("failAllInProgress() marks pending, downloading, and moving jobs as failed,
   assert.equal(store.get(pending.id)!.status, "failed");
   assert.equal(store.get(pending.id)!.errorMessage, "interrupted by server restart");
   assert.equal(store.get(downloading.id)!.status, "failed");
+  assert.equal(store.get(transcoding.id)!.status, "failed");
   assert.equal(store.get(moving.id)!.status, "failed");
   assert.equal(store.get(completed.id)!.status, "completed");
 });

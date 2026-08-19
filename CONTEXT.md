@@ -17,7 +17,7 @@ _Avoid_: Scan, Crawl
 _Avoid_: Poster（容易誤以為只從 `<video poster>` 屬性取得，實際上優先來源是截圖）, Preview
 
 **Download Job**:
-使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。若當下已達 Concurrency Limit，會先以 `queued` 狀態進 Queue 等待，取得執行名額後才真正開始。
+使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。若當下已達 Concurrency Limit，會先以 `queued` 狀態進 Queue 等待，取得執行名額後才真正開始。若 Job 建立當下的全域「是否轉檔」設定為開啟，下載完成後還會多經過一次 Transcode 才算真正完成（見該詞條）；建立之後才調整設定不會影響這個 Job。
 _Avoid_: Task, Recording（本專案不含開放式直播錄製，只做單一影片下載）
 
 **Destination Folder**:
@@ -29,9 +29,21 @@ _Avoid_: Path, Output Directory（容易跟代表整個伺服器設定值的 `DO
 _Avoid_: Max Downloads（容易誤解成「累計下載總數」而非「同時執行數」）
 
 **Queue**:
-因為 Concurrency Limit 已滿而尚未取得執行名額、狀態為 `queued` 的 Download Job 集合，依建立時間先進先出遞補名額。使用者可以取消還在 Queue 中、尚未真正開始執行的 Download Job；已取得名額執行中的則不可取消。
-_Avoid_: Waitlist, Backlog
+因為 Concurrency Limit 已滿而尚未取得執行名額、狀態為 `queued` 的 Download Job 集合，依建立時間先進先出遞補名額。使用者可以取消還在 Queue 中、尚未真正開始下載的 Download Job；已取得下載名額、正在 `downloading`／`pending`／`moving` 的則不可取消（`transcodeQueued`／`transcoding` 兩階段例外，見 Transcode Queue）。
+_Avoid_: Waitlist, Backlog, Transcode Queue（管的是轉檔名額而非下載名額，是另一個獨立的等待佇列，見該詞條）
+
+**Transcode（轉檔）**:
+Download Job 下載完原始媒體資料、原始檔已在 cache 後，若該 Job 建立當下的全域「是否轉檔」設定為開啟，就會多執行的一個步驟：用 ffmpeg（`libsvtav1` 編碼器）把影像軌重新編碼成 AV1，音訊軌以 stream copy 方式原樣封裝，輸出成單一 `.mkv` 檔案；成功後刪除轉檔前的原始檔，並讓最終輸出檔名的副檔名強制為 `.mkv`（覆蓋使用者輸入的檔名副檔名）。只套用在含有影像軌的來源——純音訊來源（例如偵測到的 `.mp3`／`.m4a` 直接檔案 Candidate）不受影響，照原樣下載存檔。畫質／速度取捨（preset、CRF）目前是寫死的固定值，不開放調整；也不偵測來源是否已經是 AV1，一律重新編碼。轉檔本身也可能因為 Transcode Concurrency Limit 已滿而先進 Transcode Queue 等待。
+_Avoid_: Convert, Encode（籠統，未區分這是專案裡固定的「輸出 MKV/AV1」這一種轉檔，不是泛用轉檔器）, Compress（容易誤以為目的是省空間，實際上是統一輸出格式）
+
+**Transcode Concurrency Limit**:
+使用者透過 Settings 設定的整數，決定伺服器同時最多有幾個 Download Job 可以佔用轉檔執行名額（`transcodeQueued`／`transcoding` 兩階段算），跟決定下載名額的 Concurrency Limit 是完全獨立的兩個池子、兩個設定值——AV1 軟體編碼非常吃 CPU，跟下載時佔用的瀏覽器／網路資源是不同種類的瓶頸，混在同一個名額池會讓兩者互相卡住。使用者未設定過時預設為 1；可隨時調整，調低不會中止已在轉檔中的 Download Job。
+_Avoid_: Concurrency Limit（那是下載名額，不是轉檔名額，兩者容易混淆但管的是不同資源）
+
+**Transcode Queue（轉檔佇列）**:
+下載已完成、原始檔已在 cache，但因為 Transcode Concurrency Limit 已滿而尚未取得轉檔執行名額、狀態為 `transcodeQueued` 的 Download Job 集合，依先進先出遞補名額，行為比照 Queue，但是完全獨立的等待佇列與名額池，不要跟 Queue 搞混。一個 Download Job 可能兩個佇列都經過（先在 Queue 等下載名額，下載完再進 Transcode Queue 等轉檔名額），也可能都不經過（該 Job 建立當下轉檔設定為關閉時，完全跳過這一步）。跟 Queue 不同的是：使用者不只能取消還在 Transcode Queue 中等待的 Download Job，連正在 `transcoding`（ffmpeg 執行中）的也可以取消——中止 ffmpeg 行程、刪除半成品輸出檔（因為 kill 一個 ffmpeg 行程是乾淨、安全的操作，不像下載階段的瀏覽器資源那樣難以安全中途收尾）。
+_Avoid_: Queue（是另一個獨立概念，管的是下載名額而非轉檔名額）
 
 **Delete（刪除歷史紀錄）**:
-使用者從下載紀錄中移除一筆已經結束（`completed`／`failed`／`cancelled`）的 Download Job；只清除伺服器內部保存的這筆紀錄本身，不會刪除已下載完成的檔案，也不會清 `CACHE_DIR` 裡任何殘留的暫存檔。跟 Queue 的「取消」是不同語意——取消是在 Download Job 還沒開始執行前不讓它開始，刪除是清掉一件已經結束的事——兩者共用同一個 `DELETE /api/downloads/:id`，依 Download Job 當下的狀態決定實際要做取消還是刪除。
+使用者從下載紀錄中移除一筆已經結束（`completed`／`failed`／`cancelled`）的 Download Job；只清除伺服器內部保存的這筆紀錄本身，不會刪除已下載完成的檔案，也不會清 `CACHE_DIR` 裡任何殘留的暫存檔。跟「取消」是不同語意——取消是讓一個還沒真正跑完的 Job 提前結束（依所在階段，可能是不讓它開始下載，也可能是中止正在跑的轉檔行程），刪除是清掉一件已經結束的事——兩者共用同一個 `DELETE /api/downloads/:id`，依 Download Job 當下的狀態決定實際要做取消還是刪除。
 _Avoid_: Remove（容易跟「取消」混為一談）, Clear History（範圍容易誤解成一次清空全部）

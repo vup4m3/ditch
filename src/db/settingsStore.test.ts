@@ -36,3 +36,29 @@ test("setConcurrencyLimit() rejects non-integer values", () => {
   const store = makeStore();
   assert.throws(() => store.setConcurrencyLimit(1.5));
 });
+
+test("getTranscodeEnabled() defaults to false when never set", () => {
+  const store = makeStore();
+  assert.equal(store.getTranscodeEnabled(), false);
+});
+
+test("setTranscodeEnabled() persists and getTranscodeEnabled() returns the new value", () => {
+  const store = makeStore();
+  store.setTranscodeEnabled(true);
+  assert.equal(store.getTranscodeEnabled(), true);
+  store.setTranscodeEnabled(false);
+  assert.equal(store.getTranscodeEnabled(), false);
+});
+
+test("getTranscodeConcurrencyLimit() defaults to 1 when never set", () => {
+  const store = makeStore();
+  assert.equal(store.getTranscodeConcurrencyLimit(), 1);
+});
+
+test("setTranscodeConcurrencyLimit() persists and rejects invalid values", () => {
+  const store = makeStore();
+  store.setTranscodeConcurrencyLimit(4);
+  assert.equal(store.getTranscodeConcurrencyLimit(), 4);
+  assert.throws(() => store.setTranscodeConcurrencyLimit(0));
+  assert.throws(() => store.setTranscodeConcurrencyLimit(1.5));
+});

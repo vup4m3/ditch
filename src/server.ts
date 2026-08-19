@@ -9,6 +9,7 @@ import { runDetectionSession } from "./detection/session.ts";
 import { resolveSegments } from "./download/resolveSegments.ts";
 import { downloadToFile } from "./download/job.ts";
 import { relocateFile } from "./download/relocateFile.ts";
+import { transcodeToMkvAv1 } from "./download/transcode.ts";
 
 const PORT = Number(process.env.PORT ?? 3000);
 // Fast local scratch space segments are written to first (e.g. an SSD) — kept separate from
@@ -37,6 +38,14 @@ async function main() {
       `${orphanedQueue.length} job(s) were still queued before restart and won't auto-resume: ${orphanedQueue.map((j) => j.id).join(", ")}`,
     );
   }
+  // Same restart caveat as the Queue above, but for the Transcode Queue (ADR-0013): the
+  // cache path/duration a waiting job needs only ever lived in memory.
+  const orphanedTranscodeQueue = jobStore.listTranscodeQueued();
+  if (orphanedTranscodeQueue.length > 0) {
+    console.warn(
+      `${orphanedTranscodeQueue.length} job(s) were still waiting to transcode before restart and won't auto-resume: ${orphanedTranscodeQueue.map((j) => j.id).join(", ")}`,
+    );
+  }
 
   const app = createApp({
     jobStore,
@@ -47,6 +56,7 @@ async function main() {
     resolveSegments,
     downloadToFile,
     relocateFile,
+    transcode: transcodeToMkvAv1,
   });
 
   app.use(express.static(join(import.meta.dirname, "public")));

@@ -7,7 +7,8 @@ A live-stream downloader that runs as a web server: paste a page URL, the server
 ## Features
 
 - **Detection**: Spins up a headless browser (Playwright) for any page URL and finds HLS (`.m3u8`) manifests, DASH (`.mpd`) manifests, or direct audio/video files that appear while the page loads, streaming them as a candidate list in real time (SSE). DRM-protected items are flagged but cannot be downloaded.
-- **Download**: Pure JS/Node implementation with no ffmpeg dependency. Automatically parses manifest segments, handles AES-128 decryption and fMP4 init segments, downloads segments sequentially and stitches them into a single file, with real-time progress reporting.
+- **Download**: Pure JS/Node implementation, no ffmpeg involved. Automatically parses manifest segments, handles AES-128 decryption and fMP4 init segments, downloads segments sequentially and stitches them into a single file, with real-time progress reporting.
+- **Transcode (optional)**: When enabled in Settings, every download is re-encoded to AV1/MKV (`ffmpeg` + `libsvtav1`) after it finishes downloading, replacing whatever format the source used — audio is copied through untouched. Off by default; requires `ffmpeg` in the runtime image. Runs on its own separate concurrency limit from downloads, since it's a CPU-bound step rather than a network one, and can be cancelled mid-encode. See [`docs/adr/0012`](docs/adr/0012-ffmpeg-transcode-to-mkv-av1.md) and [`docs/adr/0013`](docs/adr/0013-separate-transcode-concurrency-limit.md).
 - **Two-phase landing**: Downloads are first written to a local cache (an SSD is recommended), then moved as a whole to the final destination (which can be a high-latency mount like NFS) once complete — avoiding I/O against a slow mount for the entire duration of the download. See [`docs/adr/0005`](docs/adr/0005-ssd-cache-before-nfs-destination.md) for details.
 - **Collision protection**: The destination directory is a flat structure, and the filename is whatever you typed; if a file with the same name already exists at the destination, the download is blocked beforehand so you can choose to overwrite or cancel — it never silently renames or overwrites.
 - **Anti-detection**: Both detection and download apply basic anti-bot measures (overriding `navigator.webdriver`, using a standard desktop Chrome UA); when a CDN blocks the Node-side fetch, it falls back to refetching through the same already-verified browser context.
@@ -86,7 +87,7 @@ npm run build       # compile to dist/, used by npm start
 ## Architecture Overview
 
 1. `POST /api/detections` starts a Detection Session (loading the page in a headless browser) and pushes found Candidates in real time via SSE.
-2. `POST /api/downloads` creates a Download Job from the selected Candidate: parses manifest segments → writes to `CACHE_DIR` → moves to `DOWNLOADS_DIR` → marks it complete. Job status (`pending` → `downloading` → `moving` → `completed`/`failed`) and progress are persisted in SQLite and pushed to the frontend in real time via SSE.
+2. `POST /api/downloads` creates a Download Job from the selected Candidate: parses manifest segments → writes to `CACHE_DIR` → (if Transcode is enabled) re-encodes to AV1/MKV → moves to `DOWNLOADS_DIR` → marks it complete. Job status (`pending` → `downloading` → [`transcodeQueued` → `transcoding` →] `moving` → `completed`/`failed`) and progress are persisted in SQLite and pushed to the frontend in real time via SSE.
 3. `GET /api/downloads/:id/file` serves the completed file for download.
 
 The project's domain vocabulary (Candidate / Detection Session / Download Job) is defined in [`CONTEXT.md`](CONTEXT.md); key architecture decisions are recorded in [`docs/adr/`](docs/adr/).

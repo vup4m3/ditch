@@ -7,7 +7,8 @@
 ## 功能
 
 - **偵測**：對任意網頁網址啟動一次無頭瀏覽器（Playwright），找出頁面載入過程中出現的 HLS（`.m3u8`）、DASH（`.mpd`）manifest 或直接影音檔案，即時（SSE）列成候選清單；DRM 保護的項目會標示出來但不能下載。
-- **下載**：純 JS/Node 實作，不依賴 ffmpeg。自動解析 manifest 分段、處理 AES-128 解密與 fMP4 init segment，逐段下載併接成單一檔案；進度即時回報。
+- **下載**：純 JS/Node 實作，過程本身不涉及 ffmpeg。自動解析 manifest 分段、處理 AES-128 解密與 fMP4 init segment，逐段下載併接成單一檔案；進度即時回報。
+- **轉檔（Transcode，選用）**：在 Settings 開啟後，每個下載完成的檔案都會再用 `ffmpeg`／`libsvtav1` 重新編碼成 AV1/MKV，取代來源原本的格式；音訊則原樣封裝、不重新編碼。預設關閉，需要 runtime image 裡有 `ffmpeg`。轉檔用獨立於下載的另一組同時執行上限（CPU 密集，跟下載的網路/瀏覽器資源是不同瓶頸），也可以在轉檔中途取消。細節見 [`docs/adr/0012`](docs/adr/0012-ffmpeg-transcode-to-mkv-av1.md) 與 [`docs/adr/0013`](docs/adr/0013-separate-transcode-concurrency-limit.md)。
 - **兩段式落地**：下載先寫進本機 cache（建議放 SSD），完成後才整份搬到最終目的地（可以是 NFS 等高延遲掛載），避免整段下載期間都直接對慢速掛載發 I/O。細節見 [`docs/adr/0005`](docs/adr/0005-ssd-cache-before-nfs-destination.md)。
 - **撞名保護**：目的地目錄是扁平結構，檔名就是你打的那個；如果目的地已有同名檔案，下載前會先擋下來讓你選擇覆蓋或取消，不會靜默改名或覆蓋。
 - **反偵測**：偵測與下載都套用基本反機器人措施（覆寫 `navigator.webdriver`、使用一般桌面版 Chrome UA）；遇到 CDN 封鎖 Node 端 fetch 時，會 fallback 成用同一個已通過驗證的瀏覽器 context 重新抓取。
@@ -86,7 +87,7 @@ npm run build       # 編譯到 dist/，供 npm start 使用
 ## 架構概覽
 
 1. `POST /api/detections` 啟動一次 Detection Session（無頭瀏覽器載入頁面），透過 SSE 即時推送找到的 Candidate。
-2. `POST /api/downloads` 依選定的 Candidate 建立 Download Job：解析 manifest 分段 → 寫入 `CACHE_DIR` → 搬移到 `DOWNLOADS_DIR` → 標記完成，任務狀態（`pending` → `downloading` → `moving` → `completed`/`failed`）與進度都持久化在 SQLite，並透過 SSE 即時推送給前端。
+2. `POST /api/downloads` 依選定的 Candidate 建立 Download Job：解析 manifest 分段 → 寫入 `CACHE_DIR` →（若開啟 Transcode）重新編碼成 AV1/MKV → 搬移到 `DOWNLOADS_DIR` → 標記完成，任務狀態（`pending` → `downloading` → [`transcodeQueued` → `transcoding` →] `moving` → `completed`/`failed`）與進度都持久化在 SQLite，並透過 SSE 即時推送給前端。
 3. `GET /api/downloads/:id/file` 提供完成檔案的下載。
 
 專案裡的領域詞彙（Candidate / Detection Session / Download Job）定義在 [`CONTEXT.md`](CONTEXT.md)；重要架構決策記錄在 [`docs/adr/`](docs/adr/)。

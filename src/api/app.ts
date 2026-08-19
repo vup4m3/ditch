@@ -11,6 +11,7 @@ import type { DetectionResult } from "../detection/session.ts";
 import type { DownloadJobRecord } from "../db/types.ts";
 import type { ManifestSegment } from "../download/manifest/types.ts";
 import type { DownloadProgress, DownloadRequestOptions } from "../download/job.ts";
+import type { TranscodeHandle, TranscodeProgress } from "../download/transcode.ts";
 
 export interface AppDependencies {
   jobStore: JobStore;
@@ -29,6 +30,13 @@ export interface AppDependencies {
   ) => Promise<void>;
   /** Moves the completed file from the cache into its final destination (see ADR-0005). */
   relocateFile: (sourcePath: string, destPath: string) => Promise<void>;
+  /** Re-encodes video to AV1/MKV, copying audio as-is (ADR-0012). Only invoked when a job's transcodeEnabled is true. */
+  transcode: (
+    inputPath: string,
+    outputPath: string,
+    totalDurationSeconds: number,
+    onProgress?: (progress: TranscodeProgress) => void,
+  ) => TranscodeHandle;
 }
 
 interface DetectionEntry {
@@ -37,9 +45,26 @@ interface DetectionEntry {
   result?: DetectionResult;
 }
 
+type DownloadEventType =
+  | "queued"
+  | "progress"
+  | "transcodeQueued"
+  | "transcoding"
+  | "moving"
+  | "done"
+  | "error"
+  | "cancelled";
+
 function sanitizeFilename(name: string): string {
   const base = basename(name).trim();
   return base.length > 0 ? base : "download";
+}
+
+/** Forces a filename's extension to .mkv (ADR-0012 Q9) — used whenever a job will transcode. */
+function withMkvExtension(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  const base = dot > 0 ? filename.slice(0, dot) : filename;
+  return `${base}.mkv`;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -56,15 +81,20 @@ export function createApp(deps: AppDependencies): Express {
   app.use(express.json());
 
   const detections = new Map<string, DetectionEntry>();
-  const downloadChannels = new Map<
-    string,
-    SseChannel<{ type: "queued" | "progress" | "moving" | "done" | "error" | "cancelled"; data: unknown }>
-  >();
+  const downloadChannels = new Map<string, SseChannel<{ type: DownloadEventType; data: unknown }>>();
   // What a queued/pending job needs to actually run, keyed by job id — set at creation time,
   // dropped once the job leaves the system (moving/completed/failed/cancelled). Not persisted:
   // a "queued" job surviving a server restart (ADR-0009) has no entry here, so it stays queued
   // but won't auto-resume until the user cancels and resubmits it.
   const jobWork = new Map<string, { candidate: Candidate; headers: DownloadRequestOptions }>();
+  // A job waiting in the Transcode Queue (ADR-0013) parks here — resolve() (called by
+  // promoteTranscodeQueued once a slot frees up) lets its pipeline continue into transcoding;
+  // reject() (called when the DELETE handler cancels a still-queued job) unwinds it instead.
+  // Not persisted, same restart caveat as jobWork/queued above.
+  const transcodeSlotWaiters = new Map<string, { resolve: () => void; reject: (err: Error) => void }>();
+  // The currently-running ffmpeg process for each actively-transcoding job, so the DELETE
+  // handler can kill it (ADR-0013's cancel-mid-transcode support).
+  const transcodeHandles = new Map<string, TranscodeHandle>();
 
   /** Tells every still-queued job's subscriber where it now sits in line (1-based, oldest first). */
   function broadcastQueuePositions(): void {
@@ -87,44 +117,135 @@ export function createApp(deps: AppDependencies): Express {
     if (promoted) broadcastQueuePositions(); // jobs behind the promoted one moved up
   }
 
+  /** Tells every still-transcode-queued job's subscriber where it now sits in line (ADR-0013). */
+  function broadcastTranscodeQueuePositions(): void {
+    deps.jobStore.listTranscodeQueued().forEach((job, index) => {
+      downloadChannels.get(job.id)?.publish({ type: "transcodeQueued", data: { position: index + 1 } });
+    });
+  }
+
+  /** Fills free transcode slots with the longest-waiting transcodeQueued jobs (ADR-0013). */
+  function promoteTranscodeQueued(): void {
+    let promoted = false;
+    while (deps.jobStore.countActiveTranscode() < deps.settingsStore.getTranscodeConcurrencyLimit()) {
+      const next = deps.jobStore.nextTranscodeQueued();
+      if (!next) break;
+      const waiter = transcodeSlotWaiters.get(next.id);
+      if (!waiter) break; // orphaned by a restart — no in-memory continuation to resume
+      transcodeSlotWaiters.delete(next.id);
+      deps.jobStore.markTranscoding(next.id);
+      waiter.resolve();
+      promoted = true;
+    }
+    if (promoted) broadcastTranscodeQueuePositions();
+  }
+
+  /**
+   * Resolves once `job` holds a transcode slot — immediately if one's free, otherwise after
+   * waiting in the Transcode Queue until promoteTranscodeQueued() picks it (ADR-0013). Rejects
+   * if the job is cancelled while still waiting.
+   */
+  function acquireTranscodeSlot(job: DownloadJobRecord): Promise<void> {
+    if (deps.jobStore.countActiveTranscode() < deps.settingsStore.getTranscodeConcurrencyLimit()) {
+      deps.jobStore.markTranscoding(job.id);
+      return Promise.resolve();
+    }
+    deps.jobStore.markTranscodeQueued(job.id);
+    const position = deps.jobStore.listTranscodeQueued().length;
+    downloadChannels.get(job.id)?.publish({ type: "transcodeQueued", data: { position } });
+    return new Promise<void>((resolve, reject) => {
+      transcodeSlotWaiters.set(job.id, { resolve, reject });
+    });
+  }
+
   function runJob(job: DownloadJobRecord, work: { candidate: Candidate; headers: DownloadRequestOptions }): void {
     const { candidate, headers } = work;
     const channel = downloadChannels.get(job.id)!;
     deps.jobStore.markPending(job.id);
 
     const cacheJobDir = join(deps.cacheDir, job.id);
-    const cachePath = join(cacheJobDir, job.filename);
+    // While transcoding, the raw download and the transcoded result briefly coexist in cache
+    // under different names — "source" for the pre-transcode bytes, job.filename (already
+    // forced to .mkv, see withMkvExtension) for ffmpeg's output.
+    const downloadPath = job.transcodeEnabled ? join(cacheJobDir, "source") : join(cacheJobDir, job.filename);
     const finalDir = join(deps.downloadsDir, job.destinationFolder);
     const finalPath = join(finalDir, job.filename);
 
     (async () => {
       await mkdir(cacheJobDir, { recursive: true });
       const segments = await deps.resolveSegments(candidate, headers);
-      await deps.downloadToFile(segments, cachePath, headers, (progress) => {
+      await deps.downloadToFile(segments, downloadPath, headers, (progress) => {
         const fraction = progress.totalSegments > 0 ? progress.completedSegments / progress.totalSegments : 0;
         deps.jobStore.updateProgress(job.id, fraction);
         channel.publish({ type: "progress", data: progress });
       });
 
-      deps.jobStore.markMoving(job.id);
-      channel.publish({ type: "moving", data: {} });
       jobWork.delete(job.id);
-      promoteQueued(); // downloading -> moving frees this job's slot
+
+      let sourceForRelocate = downloadPath;
+      if (job.transcodeEnabled) {
+        // acquireTranscodeSlot() synchronously moves the job to transcodeQueued or transcoding
+        // — either way, out of the ('pending'|'downloading') set countActive() checks — so it's
+        // safe to free the download slot right after calling it, same as markMoving() below for
+        // the non-transcoding path. Calling promoteQueued() beforehand would under-count: the
+        // job's status would still read "downloading" and it'd still occupy its own slot.
+        const slotAcquired = acquireTranscodeSlot(job);
+        promoteQueued();
+        await slotAcquired; // may have waited in the Transcode Queue; throws if cancelled while waiting
+        channel.publish({ type: "transcoding", data: {} });
+
+        const totalDurationSeconds = segments.reduce((sum, s) => sum + s.durationSeconds, 0);
+        const mkvPath = join(cacheJobDir, job.filename);
+        const handle = deps.transcode(downloadPath, mkvPath, totalDurationSeconds, (progress) => {
+          const fraction = progress.totalSeconds > 0 ? progress.encodedSeconds / progress.totalSeconds : 0;
+          deps.jobStore.updateTranscodeProgress(job.id, fraction);
+          channel.publish({ type: "transcoding", data: progress });
+        });
+        transcodeHandles.set(job.id, handle);
+        try {
+          await handle.done;
+        } finally {
+          transcodeHandles.delete(job.id);
+        }
+
+        await rm(downloadPath, { force: true }); // Q5: drop the pre-transcode original once it succeeded
+        sourceForRelocate = mkvPath;
+
+        // markMoving() must happen before promoteTranscodeQueued() — same reasoning as
+        // promoteQueued() above: countActiveTranscode() only stops counting this job once its
+        // status has actually left "transcoding".
+        deps.jobStore.markMoving(job.id);
+        channel.publish({ type: "moving", data: {} });
+        promoteTranscodeQueued(); // transcoding -> moving frees this job's transcode slot
+      } else {
+        deps.jobStore.markMoving(job.id);
+        channel.publish({ type: "moving", data: {} });
+        promoteQueued(); // downloading -> moving frees this job's download slot
+      }
 
       await mkdir(finalDir, { recursive: true });
-      await deps.relocateFile(cachePath, finalPath);
+      await deps.relocateFile(sourceForRelocate, finalPath);
       await rm(cacheJobDir, { recursive: true, force: true });
 
       deps.jobStore.markCompleted(job.id, finalPath);
       channel.publish({ type: "done", data: { outputPath: finalPath } });
       channel.close();
     })().catch((err: unknown) => {
+      jobWork.delete(job.id);
+      transcodeHandles.delete(job.id);
+      if (deps.jobStore.get(job.id)?.status === "cancelled") {
+        // The DELETE handler already updated the record, published "cancelled", and closed
+        // the channel — nothing left to do here but free up the slots this job was holding.
+        promoteQueued();
+        promoteTranscodeQueued();
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       deps.jobStore.markFailed(job.id, message);
       channel.publish({ type: "error", data: { message } });
       channel.close();
-      jobWork.delete(job.id);
-      promoteQueued(); // failure before reaching moving also frees a slot
+      promoteQueued();
+      promoteTranscodeQueued();
     });
   }
 
@@ -240,7 +361,11 @@ export function createApp(deps: AppDependencies): Express {
       return;
     }
 
-    const sanitizedFilename = sanitizeFilename(typeof filename === "string" && filename ? filename : "download");
+    // Frozen for this job's whole lifetime (Q8) — changing the setting afterwards never
+    // retroactively changes an already-created job.
+    const transcodeEnabled = deps.settingsStore.getTranscodeEnabled();
+    let sanitizedFilename = sanitizeFilename(typeof filename === "string" && filename ? filename : "download");
+    if (transcodeEnabled) sanitizedFilename = withMkvExtension(sanitizedFilename);
     const finalDir = join(deps.downloadsDir, destinationFolder);
     const finalPath = join(finalDir, sanitizedFilename);
     if (!overwrite && (await pathExists(finalPath))) {
@@ -260,8 +385,9 @@ export function createApp(deps: AppDependencies): Express {
       filename: sanitizedFilename,
       destinationFolder,
       initialStatus: hasFreeSlot ? "pending" : "queued",
+      transcodeEnabled,
     });
-    const channel = new SseChannel<{ type: "queued" | "progress" | "moving" | "done" | "error" | "cancelled"; data: unknown }>();
+    const channel = new SseChannel<{ type: DownloadEventType; data: unknown }>();
     downloadChannels.set(job.id, channel);
     jobWork.set(job.id, { candidate, headers });
     const queuePosition = hasFreeSlot ? undefined : deps.jobStore.listQueued().length;
@@ -272,8 +398,10 @@ export function createApp(deps: AppDependencies): Express {
     }
   });
 
-  // "Cancel" (queued) and "delete a history record" (completed/failed/cancelled) are different
-  // concepts sharing one action — both mean "I don't want this one anymore" (ADR-0010).
+  // "Cancel" (queued, transcodeQueued, or transcoding) and "delete a history record"
+  // (completed/failed/cancelled) are different concepts sharing one action — both mean "I
+  // don't want this one anymore" (ADR-0010). Cancelling while transcoding kills the ffmpeg
+  // process — unlike downloading, that's a clean operation (ADR-0013).
   app.delete("/api/downloads/:id", (req, res) => {
     const id = req.params.id!;
 
@@ -284,6 +412,31 @@ export function createApp(deps: AppDependencies): Express {
       channel?.close();
       downloadChannels.delete(id);
       broadcastQueuePositions(); // jobs behind the cancelled one moved up
+      res.status(200).json({ ok: true });
+      return;
+    }
+
+    const transcodeWaiter = transcodeSlotWaiters.get(id);
+    if (transcodeWaiter && deps.jobStore.cancelTranscode(id)) {
+      transcodeSlotWaiters.delete(id);
+      const channel = downloadChannels.get(id);
+      channel?.publish({ type: "cancelled", data: {} });
+      channel?.close();
+      downloadChannels.delete(id);
+      transcodeWaiter.reject(new Error("cancelled"));
+      broadcastTranscodeQueuePositions(); // jobs behind the cancelled one moved up
+      res.status(200).json({ ok: true });
+      return;
+    }
+
+    const transcodeHandle = transcodeHandles.get(id);
+    if (transcodeHandle && deps.jobStore.cancelTranscode(id)) {
+      transcodeHandles.delete(id);
+      const channel = downloadChannels.get(id);
+      channel?.publish({ type: "cancelled", data: {} });
+      channel?.close();
+      downloadChannels.delete(id);
+      transcodeHandle.cancel(); // kills ffmpeg; its rejected done promise is absorbed by runJob's catch (status is already "cancelled")
       res.status(200).json({ ok: true });
       return;
     }
@@ -303,19 +456,30 @@ export function createApp(deps: AppDependencies): Express {
   });
 
   app.get("/api/settings", (_req, res) => {
-    res.json({ concurrencyLimit: deps.settingsStore.getConcurrencyLimit() });
+    res.json({
+      concurrencyLimit: deps.settingsStore.getConcurrencyLimit(),
+      transcodeEnabled: deps.settingsStore.getTranscodeEnabled(),
+      transcodeConcurrencyLimit: deps.settingsStore.getTranscodeConcurrencyLimit(),
+    });
   });
 
   app.put("/api/settings", (req, res) => {
-    const { concurrencyLimit } = req.body ?? {};
+    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = req.body ?? {};
     try {
-      deps.settingsStore.setConcurrencyLimit(concurrencyLimit);
+      if (concurrencyLimit !== undefined) deps.settingsStore.setConcurrencyLimit(concurrencyLimit);
+      if (transcodeEnabled !== undefined) deps.settingsStore.setTranscodeEnabled(Boolean(transcodeEnabled));
+      if (transcodeConcurrencyLimit !== undefined) deps.settingsStore.setTranscodeConcurrencyLimit(transcodeConcurrencyLimit);
     } catch {
-      res.status(400).json({ error: "invalid_concurrency_limit" });
+      res.status(400).json({ error: "invalid_settings" });
       return;
     }
     promoteQueued(); // a higher limit may free up slots for jobs already waiting
-    res.json({ concurrencyLimit: deps.settingsStore.getConcurrencyLimit() });
+    promoteTranscodeQueued();
+    res.json({
+      concurrencyLimit: deps.settingsStore.getConcurrencyLimit(),
+      transcodeEnabled: deps.settingsStore.getTranscodeEnabled(),
+      transcodeConcurrencyLimit: deps.settingsStore.getTranscodeConcurrencyLimit(),
+    });
   });
 
   app.get("/api/downloads", (_req, res) => {
