@@ -13,6 +13,14 @@ const TRANSCODE_CONCURRENCY_LIMIT_KEY = "transcodeConcurrencyLimit";
 // AV1 software encoding is CPU-heavy; default conservatively to one at a time (ADR-0013).
 const DEFAULT_TRANSCODE_CONCURRENCY_LIMIT = 1;
 
+const SUGGESTED_FILENAME_MAX_LENGTH_KEY = "suggestedFilenameMaxLength";
+// Character cap the frontend applies to the page-title-derived Suggested Filename (ADR-0014).
+const DEFAULT_SUGGESTED_FILENAME_MAX_LENGTH = 80;
+// Below this the suggestion stops being useful; also the floor accepted from the Settings UI.
+const MIN_SUGGESTED_FILENAME_MAX_LENGTH = 10;
+// Stored in place of a real length to mean "no cap"; surfaces as null over the API.
+const SUGGESTED_FILENAME_MAX_LENGTH_OFF = 0;
+
 interface Row {
   value: string;
 }
@@ -76,5 +84,26 @@ export class SettingsStore {
       throw new Error("transcode concurrency limit must be an integer >= 1");
     }
     this.#set(TRANSCODE_CONCURRENCY_LIMIT_KEY, String(limit));
+  }
+
+  /**
+   * Max characters the frontend keeps of the page-title-derived Suggested Filename (ADR-0014),
+   * or null for no cap. Purely cosmetic — the server-side byte cap in app.ts is separate.
+   */
+  getSuggestedFilenameMaxLength(): number | null {
+    const raw = this.#get(SUGGESTED_FILENAME_MAX_LENGTH_KEY);
+    const value = raw !== undefined ? Number(raw) : DEFAULT_SUGGESTED_FILENAME_MAX_LENGTH;
+    return value === SUGGESTED_FILENAME_MAX_LENGTH_OFF ? null : value;
+  }
+
+  setSuggestedFilenameMaxLength(length: number | null): void {
+    if (length === null) {
+      this.#set(SUGGESTED_FILENAME_MAX_LENGTH_KEY, String(SUGGESTED_FILENAME_MAX_LENGTH_OFF));
+      return;
+    }
+    if (!Number.isInteger(length) || length < MIN_SUGGESTED_FILENAME_MAX_LENGTH) {
+      throw new Error(`suggested filename max length must be an integer >= ${MIN_SUGGESTED_FILENAME_MAX_LENGTH} or null`);
+    }
+    this.#set(SUGGESTED_FILENAME_MAX_LENGTH_KEY, String(length));
   }
 }

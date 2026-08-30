@@ -62,3 +62,23 @@ test("setTranscodeConcurrencyLimit() persists and rejects invalid values", () =>
   assert.throws(() => store.setTranscodeConcurrencyLimit(0));
   assert.throws(() => store.setTranscodeConcurrencyLimit(1.5));
 });
+
+test("getSuggestedFilenameMaxLength() defaults to 80 when never set", () => {
+  const store = makeStore();
+  assert.equal(store.getSuggestedFilenameMaxLength(), 80);
+});
+
+test("setSuggestedFilenameMaxLength() persists a value and round-trips null as 'no cap'", () => {
+  const store = makeStore();
+  store.setSuggestedFilenameMaxLength(40);
+  assert.equal(store.getSuggestedFilenameMaxLength(), 40);
+  store.setSuggestedFilenameMaxLength(null);
+  assert.equal(store.getSuggestedFilenameMaxLength(), null);
+});
+
+test("setSuggestedFilenameMaxLength() rejects values below 10 and non-integers", () => {
+  const store = makeStore();
+  assert.throws(() => store.setSuggestedFilenameMaxLength(9));
+  assert.throws(() => store.setSuggestedFilenameMaxLength(0));
+  assert.throws(() => store.setSuggestedFilenameMaxLength(20.5));
+});

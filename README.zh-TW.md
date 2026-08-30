@@ -10,7 +10,8 @@
 - **下載**：純 JS/Node 實作，過程本身不涉及 ffmpeg。自動解析 manifest 分段、處理 AES-128 解密與 fMP4 init segment，逐段下載併接成單一檔案；進度即時回報。
 - **轉檔（Transcode，選用）**：在 Settings 開啟後，每個下載完成的檔案都會再用 `ffmpeg`／`libsvtav1` 重新編碼成 AV1/MKV，取代來源原本的格式；音訊則原樣封裝、不重新編碼。預設關閉，需要 runtime image 裡有 `ffmpeg`。轉檔用獨立於下載的另一組同時執行上限（CPU 密集，跟下載的網路/瀏覽器資源是不同瓶頸），也可以在轉檔中途取消。細節見 [`docs/adr/0012`](docs/adr/0012-ffmpeg-transcode-to-mkv-av1.md) 與 [`docs/adr/0013`](docs/adr/0013-separate-transcode-concurrency-limit.md)。
 - **兩段式落地**：下載先寫進本機 cache（建議放 SSD），完成後才整份搬到最終目的地（可以是 NFS 等高延遲掛載），避免整段下載期間都直接對慢速掛載發 I/O。細節見 [`docs/adr/0005`](docs/adr/0005-ssd-cache-before-nfs-destination.md)。
-- **撞名保護**：目的地目錄是扁平結構，檔名就是你打的那個；如果目的地已有同名檔案，下載前會先擋下來讓你選擇覆蓋或取消，不會靜默改名或覆蓋。
+- **建議檔名**：每個偵測到的候選項目，檔名欄位會用頁面標題預先填好，並去掉常見的樣板後綴（`… - 頻道 - YouTube`），再套上可選的字元數上限（Settings，預設 80）。只是建議值，可自由修改。細節見 [`docs/adr/0014`](docs/adr/0014-suggested-filename-cleanup-and-length.md)。
+- **撞名保護**：目的地目錄是扁平結構，檔名就是你打的那個；如果目的地已有同名檔案，下載前會先擋下來讓你選擇覆蓋或取消，不會靜默改名或覆蓋。檔名過長時會裁短到不超過檔案系統的單檔名上限。
 - **反偵測**：偵測與下載都套用基本反機器人措施（覆寫 `navigator.webdriver`、使用一般桌面版 Chrome UA）；遇到 CDN 封鎖 Node 端 fetch 時，會 fallback 成用同一個已通過驗證的瀏覽器 context 重新抓取。
 
 ## 快速開始（Docker）

@@ -55,9 +55,29 @@ type DownloadEventType =
   | "error"
   | "cancelled";
 
+// Most filesystems cap a single filename at 255 bytes; keep headroom for the two-phase
+// landing's "source" name, the .mkv rename, and any collision suffix (ADR-0014).
+const MAX_FILENAME_BYTES = 200;
+
+/** Trims a filename to MAX_FILENAME_BYTES, cutting on a character boundary and keeping the extension. */
+function capFilenameBytes(name: string): string {
+  if (Buffer.byteLength(name, "utf8") <= MAX_FILENAME_BYTES) return name;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot) : "";
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const budget = MAX_FILENAME_BYTES - Buffer.byteLength(ext, "utf8");
+  const chars = Array.from(base);
+  let kept = "";
+  for (const ch of chars) {
+    if (Buffer.byteLength(kept + ch, "utf8") > budget) break;
+    kept += ch;
+  }
+  return `${kept.trimEnd()}${ext}` || "download";
+}
+
 function sanitizeFilename(name: string): string {
   const base = basename(name).trim();
-  return base.length > 0 ? base : "download";
+  return capFilenameBytes(base.length > 0 ? base : "download");
 }
 
 /** Forces a filename's extension to .mkv (ADR-0012 Q9) — used whenever a job will transcode. */
@@ -455,31 +475,35 @@ export function createApp(deps: AppDependencies): Express {
     res.status(200).json({ ok: true });
   });
 
+  const settingsSnapshot = () => ({
+    concurrencyLimit: deps.settingsStore.getConcurrencyLimit(),
+    transcodeEnabled: deps.settingsStore.getTranscodeEnabled(),
+    transcodeConcurrencyLimit: deps.settingsStore.getTranscodeConcurrencyLimit(),
+    suggestedFilenameMaxLength: deps.settingsStore.getSuggestedFilenameMaxLength(),
+  });
+
   app.get("/api/settings", (_req, res) => {
-    res.json({
-      concurrencyLimit: deps.settingsStore.getConcurrencyLimit(),
-      transcodeEnabled: deps.settingsStore.getTranscodeEnabled(),
-      transcodeConcurrencyLimit: deps.settingsStore.getTranscodeConcurrencyLimit(),
-    });
+    res.json(settingsSnapshot());
   });
 
   app.put("/api/settings", (req, res) => {
-    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = req.body ?? {};
+    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit, suggestedFilenameMaxLength } = req.body ?? {};
     try {
       if (concurrencyLimit !== undefined) deps.settingsStore.setConcurrencyLimit(concurrencyLimit);
       if (transcodeEnabled !== undefined) deps.settingsStore.setTranscodeEnabled(Boolean(transcodeEnabled));
       if (transcodeConcurrencyLimit !== undefined) deps.settingsStore.setTranscodeConcurrencyLimit(transcodeConcurrencyLimit);
+      if (suggestedFilenameMaxLength !== undefined) {
+        deps.settingsStore.setSuggestedFilenameMaxLength(
+          suggestedFilenameMaxLength === null ? null : Number(suggestedFilenameMaxLength),
+        );
+      }
     } catch {
       res.status(400).json({ error: "invalid_settings" });
       return;
     }
     promoteQueued(); // a higher limit may free up slots for jobs already waiting
     promoteTranscodeQueued();
-    res.json({
-      concurrencyLimit: deps.settingsStore.getConcurrencyLimit(),
-      transcodeEnabled: deps.settingsStore.getTranscodeEnabled(),
-      transcodeConcurrencyLimit: deps.settingsStore.getTranscodeConcurrencyLimit(),
-    });
+    res.json(settingsSnapshot());
   });
 
   app.get("/api/downloads", (_req, res) => {

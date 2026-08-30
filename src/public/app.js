@@ -16,6 +16,7 @@ const settingsForm = document.getElementById("settings-form");
 const concurrencyLimitInput = document.getElementById("concurrency-limit-input");
 const transcodeEnabledInput = document.getElementById("transcode-enabled-input");
 const transcodeConcurrencyLimitInput = document.getElementById("transcode-concurrency-limit-input");
+const suggestedFilenameMaxLengthInput = document.getElementById("suggested-filename-max-length-input");
 const settingsStatus = document.getElementById("settings-status");
 
 const folderModalOverlay = document.getElementById("folder-modal-overlay");
@@ -30,6 +31,8 @@ const folderModalConfirm = document.getElementById("folder-modal-confirm");
 const LAST_DESTINATION_FOLDER_KEY = "ditch:lastDestinationFolder";
 
 let currentDetectionId = null;
+// Character cap for the page-title-derived Suggested Filename, or null for no cap (ADR-0014).
+let suggestedFilenameMaxLength = null;
 
 function setDetectStatus(text, isError) {
   detectStatus.hidden = !text;
@@ -46,6 +49,28 @@ function extensionFor(candidate) {
 
 function sanitizeForFilename(text) {
   return text.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
+// Page titles almost always carry a boilerplate suffix ("Real Title - Channel - YouTube",
+// "Real Title ｜ Site"). Split on separators padded by whitespace; if that yields 2+ parts,
+// drop only the last one and rejoin with " - " (ADR-0014). Then collapse whitespace and
+// strip leading/trailing spaces, dots and dashes.
+function cleanTitleForFilename(title) {
+  let cleaned = title;
+  const parts = cleaned.split(/ +[-–—|｜:：] +/);
+  if (parts.length >= 2) cleaned = parts.slice(0, -1).join(" - ");
+  return cleaned.replace(/\s+/g, " ").replace(/^[\s.\-]+|[\s.\-]+$/g, "");
+}
+
+// Truncates `base` to `max` characters (code points), cutting at the last space within the
+// limit when there is one, otherwise a hard cut. `max` null/0 means no cap.
+function truncateFilenameBase(base, max) {
+  if (!max) return base;
+  const chars = Array.from(base);
+  if (chars.length <= max) return base;
+  const slice = chars.slice(0, max).join("");
+  const lastSpace = slice.lastIndexOf(" ");
+  return (lastSpace > 0 ? slice.slice(0, lastSpace) : slice).replace(/[\s.\-]+$/, "");
 }
 
 function renderCandidate(candidate) {
@@ -109,11 +134,12 @@ function backfillDefaultFilenames(pageTitle) {
   for (const row of rows) {
     const input = row.querySelector(".filename-input");
     if (input.dataset.isDefault === "true") {
-      const candidateId = row.dataset.candidateId;
       const ext = input.value.match(/\.[a-zA-Z0-9]+$/)?.[0] ?? "";
-      input.value = `${sanitizeForFilename(pageTitle) || "download"}${ext}`;
+      // Strip the title's boilerplate suffix first, then sanitize, then cap the length.
+      const cleaned = sanitizeForFilename(cleanTitleForFilename(pageTitle) || pageTitle);
+      const base = truncateFilenameBase(cleaned, suggestedFilenameMaxLength) || "download";
+      input.value = `${base}${ext}`;
       input.dataset.isDefault = "true"; // still a default, just an updated one
-      void candidateId;
     }
   }
 }
@@ -128,13 +154,18 @@ async function loadSettings() {
   try {
     const res = await fetch("/api/settings");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = await res.json();
-    concurrencyLimitInput.value = concurrencyLimit;
-    transcodeEnabledInput.checked = transcodeEnabled;
-    transcodeConcurrencyLimitInput.value = transcodeConcurrencyLimit;
+    applySettings(await res.json());
   } catch (err) {
     setSettingsStatus(`載入設定失敗：${err.message}`, true);
   }
+}
+
+function applySettings({ concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit, suggestedFilenameMaxLength: maxLen }) {
+  concurrencyLimitInput.value = concurrencyLimit;
+  transcodeEnabledInput.checked = transcodeEnabled;
+  transcodeConcurrencyLimitInput.value = transcodeConcurrencyLimit;
+  suggestedFilenameMaxLength = maxLen ?? null;
+  suggestedFilenameMaxLengthInput.value = suggestedFilenameMaxLength ?? "";
 }
 
 settingsForm.addEventListener("submit", async (event) => {
@@ -147,13 +178,12 @@ settingsForm.addEventListener("submit", async (event) => {
         concurrencyLimit: Number(concurrencyLimitInput.value),
         transcodeEnabled: transcodeEnabledInput.checked,
         transcodeConcurrencyLimit: Number(transcodeConcurrencyLimitInput.value),
+        suggestedFilenameMaxLength:
+          suggestedFilenameMaxLengthInput.value.trim() === "" ? null : Number(suggestedFilenameMaxLengthInput.value),
       }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { concurrencyLimit, transcodeEnabled, transcodeConcurrencyLimit } = await res.json();
-    concurrencyLimitInput.value = concurrencyLimit;
-    transcodeEnabledInput.checked = transcodeEnabled;
-    transcodeConcurrencyLimitInput.value = transcodeConcurrencyLimit;
+    applySettings(await res.json());
     setSettingsStatus("已儲存", false);
   } catch (err) {
     setSettingsStatus(`儲存失敗：${err.message}`, true);

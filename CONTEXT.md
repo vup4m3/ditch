@@ -16,6 +16,10 @@ _Avoid_: Scan, Crawl
 一次 Detection Session 底下所有 Candidate 共用的一張畫面，讓使用者在下載前先確認「這是不是我要的影片」。優先用 Playwright 對頁面上渲染尺寸最大的 `<video>` 元素截圖（不需要 ffmpeg，也不受 DRM／跨網域畫布安全限制影響）；截不到才退回讀頁面的 `<meta property="og:image">` 或 `<video poster>`。跟整個 Detection Session 一樣純記憶體、伺服器重啟就消失，不逐一配對到個別 Candidate（同一次偵測的 Candidate 通常是同一支影片的不同畫質，共用一張縮圖）。
 _Avoid_: Poster（容易誤以為只從 `<video poster>` 屬性取得，實際上優先來源是截圖）, Preview
 
+**Suggested Filename（建議檔名）**:
+偵測完成後，清單中每個 Candidate 都預先帶一個檔名，供使用者在送出 Download Job 前直接採用或修改。內容衍生自該次 Detection Session 的頁面標題，並去掉標題常見的網站／頻道樣板後綴、必要時再把過長的部分裁短；副檔名依 Candidate 的媒體類型決定。純屬建議值，使用者一旦手動改過就不再被自動更新，也可以完全覆寫；頁面標題不可用時退回通用名稱。使用者最終送出的檔名字串若長到危及檔案系統的單檔名上限，伺服器會再自行裁短一次，這是與「建議檔名」相互獨立的一道保護。
+_Avoid_: Default Filename（與伺服器在完全沒有檔名時採用的通用退路名稱混淆）, Title（那是頁面未經清理與裁短的原始標題）
+
 **Download Job**:
 使用者從某次 Detection Session 的 Candidate 清單中選定一項、並指定 Destination Folder 後，伺服器據此抓取媒體片段、視需要解密、輸出成單一檔案並存到本機該資料夾的一次任務；具備可追蹤的進度。若當下已達 Concurrency Limit，會先以 `queued` 狀態進 Queue 等待，取得執行名額後才真正開始。若 Job 建立當下的全域「是否轉檔」設定為開啟，下載完成後還會多經過一次 Transcode 才算真正完成（見該詞條）；建立之後才調整設定不會影響這個 Job。
 _Avoid_: Task, Recording（本專案不含開放式直播錄製，只做單一影片下載）

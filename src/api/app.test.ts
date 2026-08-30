@@ -484,7 +484,12 @@ test("GET /api/settings defaults to a concurrency limit of 3, PUT updates it, an
   await withTempDirs(async (dirs) => {
     const { baseUrl, close } = await startApp(makeDeps(dirs));
     try {
-      const defaults = { concurrencyLimit: 3, transcodeEnabled: false, transcodeConcurrencyLimit: 1 };
+      const defaults = {
+        concurrencyLimit: 3,
+        transcodeEnabled: false,
+        transcodeConcurrencyLimit: 1,
+        suggestedFilenameMaxLength: 80,
+      };
       const defaultRes = await fetch(`${baseUrl}/api/settings`);
       assert.equal(defaultRes.status, 200);
       assert.deepEqual(await defaultRes.json(), defaults);
@@ -525,7 +530,12 @@ test("PUT /api/settings updates transcodeEnabled and transcodeConcurrencyLimit i
         body: JSON.stringify({ transcodeEnabled: true, transcodeConcurrencyLimit: 2 }),
       });
       assert.equal(putRes.status, 200);
-      assert.deepEqual(await putRes.json(), { concurrencyLimit: 3, transcodeEnabled: true, transcodeConcurrencyLimit: 2 });
+      assert.deepEqual(await putRes.json(), {
+        concurrencyLimit: 3,
+        transcodeEnabled: true,
+        transcodeConcurrencyLimit: 2,
+        suggestedFilenameMaxLength: 80,
+      });
 
       const invalidRes = await fetch(`${baseUrl}/api/settings`, {
         method: "PUT",
@@ -537,7 +547,71 @@ test("PUT /api/settings updates transcodeEnabled and transcodeConcurrencyLimit i
         concurrencyLimit: 3,
         transcodeEnabled: true,
         transcodeConcurrencyLimit: 2,
+        suggestedFilenameMaxLength: 80,
       });
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("PUT /api/settings accepts null for suggestedFilenameMaxLength (no cap) and rejects values below 10 (ADR-0014)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      const put = (body: unknown) =>
+        fetch(`${baseUrl}/api/settings`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+      const okRes = await put({ suggestedFilenameMaxLength: 40 });
+      assert.equal((await okRes.json()).suggestedFilenameMaxLength, 40);
+
+      const offRes = await put({ suggestedFilenameMaxLength: null });
+      assert.equal(offRes.status, 200);
+      assert.equal((await offRes.json()).suggestedFilenameMaxLength, null, "null means no cap");
+
+      const tooSmallRes = await put({ suggestedFilenameMaxLength: 5 });
+      assert.equal(tooSmallRes.status, 400);
+      assert.equal(
+        (await (await fetch(`${baseUrl}/api/settings`)).json()).suggestedFilenameMaxLength,
+        null,
+        "a rejected update must not overwrite the previous value",
+      );
+    } finally {
+      await close();
+    }
+  });
+});
+
+test("an over-long typed filename is silently truncated to <= 200 bytes, keeping the extension and not splitting a character (ADR-0014)", async () => {
+  await withTempDirs(async (dirs) => {
+    const { baseUrl, close } = await startApp(makeDeps(dirs));
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+      await readSse(baseUrl, `/api/detections/${detectionId}/events`, 2);
+
+      const longName = `${"中".repeat(300)}.ts`;
+      const downloadRes = await fetch(`${baseUrl}/api/downloads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ detectionId, candidateId: "candidate-1", filename: longName }),
+      });
+      assert.equal(downloadRes.status, 202);
+
+      const jobs = (await (await fetch(`${baseUrl}/api/downloads`)).json()) as Array<{ filename: string }>;
+      const { filename } = jobs[0]!;
+      assert.ok(Buffer.byteLength(filename, "utf8") <= 200, `filename is ${Buffer.byteLength(filename, "utf8")} bytes`);
+      assert.ok(filename.endsWith(".ts"), "the extension survives truncation");
+      assert.ok(!filename.includes("�"), "no character was split mid-sequence");
+      assert.ok(/^中+\.ts$/.test(filename), "only the trailing overflow was trimmed");
     } finally {
       await close();
     }
