@@ -222,3 +222,33 @@ test("calls play() on <video> elements found on the page", async () => {
     stopServer(server);
   }
 });
+
+test("reports the page title as soon as it loads, and again when page JS changes it, before the session ends", async () => {
+  const { baseUrl, server } = await startFixtureServer({
+    "/page": {
+      contentType: "text/html",
+      body: `<!doctype html><html><head><title>Loading - Site</title></head><body><script>
+        setTimeout(() => { document.title = "Real Video - Channel - Site"; }, 300);
+      </script></body></html>`,
+    },
+  });
+
+  try {
+    const started = Date.now();
+    const reported: Array<{ title: string; atMs: number }> = [];
+    const result = await runDetectionSession(`${baseUrl}/page`, {
+      timeoutMs: 2000,
+      onPageTitle: (title) => reported.push({ title, atMs: Date.now() - started }),
+    });
+    const finishedMs = Date.now() - started;
+
+    assert.deepEqual(
+      reported.map((r) => r.title),
+      ["Loading - Site", "Real Video - Channel - Site"],
+    );
+    assert.ok(reported[1]!.atMs < finishedMs - 1000, "the changed title should arrive well before detection finishes");
+    assert.equal(result.pageTitle, "Real Video - Channel - Site");
+  } finally {
+    stopServer(server);
+  }
+});

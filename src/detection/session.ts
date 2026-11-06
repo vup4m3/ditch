@@ -19,9 +19,17 @@ export interface RunDetectionOptions {
   timeoutMs?: number;
   /** Invoked as each new candidate is found, before the session finishes (Q20: live-streamed list). */
   onCandidate?: (candidate: Candidate) => void;
+  /**
+   * Invoked as soon as the page has a non-empty <title>, and again whenever it changes while the
+   * session runs (SPAs often swap in the real title after load) — lets the Suggested Filename
+   * appear long before detection finishes.
+   */
+  onPageTitle?: (title: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 8000;
+// How often to re-read <title> during the fixed wait, so title changes reach the user promptly.
+const TITLE_POLL_INTERVAL_MS = 500;
 
 // Patches the Blob constructor so client-built manifests (e.g. a player assembling an
 // HLS/DASH manifest in memory before handing it to MediaSource via a blob: URL) are
@@ -174,6 +182,20 @@ export async function runDetectionSession(
 
     await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
 
+    let lastReportedTitle = "";
+    async function reportPageTitle(): Promise<void> {
+      try {
+        const title = await page.title();
+        if (title && title !== lastReportedTitle) {
+          lastReportedTitle = title;
+          options.onPageTitle?.(title);
+        }
+      } catch {
+        // page may be mid-navigation — the next poll (or the final read) will catch up
+      }
+    }
+    await reportPageTitle();
+
     // Triggers loading for players that only fetch their manifest once playback starts.
     await page.evaluate(() => {
       for (const video of Array.from(document.querySelectorAll("video"))) {
@@ -181,7 +203,11 @@ export async function runDetectionSession(
       }
     });
 
-    await page.waitForTimeout(timeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    for (let remaining = timeoutMs; remaining > 0; remaining = deadline - Date.now()) {
+      await page.waitForTimeout(Math.min(TITLE_POLL_INTERVAL_MS, remaining));
+      await reportPageTitle();
+    }
 
     const blobManifests = (await page.evaluate(() => (window as { __ditchBlobManifests?: unknown }).__ditchBlobManifests)) as
       | Array<{ text: string; type?: string }>

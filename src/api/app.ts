@@ -20,7 +20,11 @@ export interface AppDependencies {
   cacheDir: string;
   /** Final resting place for completed downloads (e.g. an NFS mount) — may be slow/high-latency. */
   downloadsDir: string;
-  runDetection: (pageUrl: string, onCandidate: (candidate: Candidate) => void) => Promise<DetectionResult>;
+  runDetection: (
+    pageUrl: string,
+    onCandidate: (candidate: Candidate) => void,
+    onPageTitle?: (title: string) => void,
+  ) => Promise<DetectionResult>;
   resolveSegments: (candidate: Candidate, headers: DownloadRequestOptions) => Promise<ManifestSegment[]>;
   downloadToFile: (
     segments: ManifestSegment[],
@@ -40,7 +44,7 @@ export interface AppDependencies {
 }
 
 interface DetectionEntry {
-  channel: SseChannel<{ type: "candidate" | "done" | "error"; data: unknown }>;
+  channel: SseChannel<{ type: "candidate" | "pageTitle" | "done" | "error"; data: unknown }>;
   candidates: Candidate[];
   result?: DetectionResult;
 }
@@ -282,10 +286,16 @@ export function createApp(deps: AppDependencies): Express {
     res.status(202).json({ id });
 
     deps
-      .runDetection(pageUrl, (candidate) => {
-        entry.candidates.push(candidate);
-        entry.channel.publish({ type: "candidate", data: candidate });
-      })
+      .runDetection(
+        pageUrl,
+        (candidate) => {
+          entry.candidates.push(candidate);
+          entry.channel.publish({ type: "candidate", data: candidate });
+        },
+        (pageTitle) => {
+          entry.channel.publish({ type: "pageTitle", data: { pageTitle } });
+        },
+      )
       .then((result) => {
         entry.result = result;
         entry.channel.publish({

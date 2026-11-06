@@ -159,6 +159,49 @@ test("full happy path: detect, list candidate, download (via cache), see it comp
   });
 });
 
+test("detection streams pageTitle events before done, so the Suggested Filename can appear early", async () => {
+  await withTempDirs(async (dirs) => {
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    const { baseUrl, close } = await startApp(
+      makeDeps(dirs, {
+        runDetection: async (pageUrl, onCandidate, onPageTitle) => {
+          onPageTitle?.("YouTube");
+          onCandidate(CANDIDATE);
+          onPageTitle?.("Real Video - Channel - YouTube");
+          await gate;
+          return { candidates: [CANDIDATE], referer: pageUrl, userAgent: "fake-agent/1.0", pageTitle: "Real Video - Channel - YouTube" };
+        },
+      }),
+    );
+    try {
+      const detectRes = await fetch(`${baseUrl}/api/detections`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pageUrl: "https://example.com/page" }),
+      });
+      const { id: detectionId } = (await detectRes.json()) as { id: string };
+
+      // Detection is still running (gate unresolved), yet the titles are already streamed.
+      const early = await readSse(baseUrl, `/api/detections/${detectionId}/events`, 3);
+      assert.deepEqual(
+        early.map((e) => e.type),
+        ["pageTitle", "candidate", "pageTitle"],
+      );
+      assert.deepEqual(early[0]?.data, { pageTitle: "YouTube" });
+      assert.deepEqual(early[2]?.data, { pageTitle: "Real Video - Channel - YouTube" });
+
+      finish();
+      const all = await readSse(baseUrl, `/api/detections/${detectionId}/events`, 4);
+      assert.equal(all[3]?.type, "done");
+      assert.equal((all[3]?.data as { pageTitle: string }).pageTitle, "Real Video - Channel - YouTube");
+    } finally {
+      finish();
+      await close();
+    }
+  });
+});
+
 test("GET /api/detections/:id/thumbnail 404s for an unknown detection id", async () => {
   await withTempDirs(async (dirs) => {
     const { baseUrl, close } = await startApp(makeDeps(dirs));

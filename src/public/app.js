@@ -31,6 +31,9 @@ const folderModalConfirm = document.getElementById("folder-modal-confirm");
 const LAST_DESTINATION_FOLDER_KEY = "ditch:lastDestinationFolder";
 
 let currentDetectionId = null;
+// Latest page title reported by the running Detection Session, or null until the first one
+// arrives — lets candidates rendered after that point start with a real Suggested Filename.
+let currentPageTitle = null;
 // Character cap for the page-title-derived Suggested Filename, or null for no cap (ADR-0014).
 let suggestedFilenameMaxLength = null;
 
@@ -106,7 +109,10 @@ function renderCandidate(candidate) {
 
   const filenameInput = document.createElement("input");
   filenameInput.className = "filename-input";
-  filenameInput.value = `candidate${extensionFor(candidate)}`;
+  filenameInput.value =
+    currentPageTitle === null
+      ? `candidate${extensionFor(candidate)}`
+      : `${suggestedFilenameBase(currentPageTitle)}${extensionFor(candidate)}`;
   filenameInput.dataset.isDefault = "true";
   filenameInput.addEventListener("input", () => {
     filenameInput.dataset.isDefault = "false";
@@ -129,15 +135,19 @@ function applyThumbnails(detectionId) {
   }
 }
 
+// Strip the title's boilerplate suffix first, then sanitize, then cap the length.
+function suggestedFilenameBase(pageTitle) {
+  const cleaned = sanitizeForFilename(cleanTitleForFilename(pageTitle) || pageTitle);
+  return truncateFilenameBase(cleaned, suggestedFilenameMaxLength) || "download";
+}
+
 function backfillDefaultFilenames(pageTitle) {
+  const base = suggestedFilenameBase(pageTitle);
   const rows = candidatesList.querySelectorAll(".candidate-row");
   for (const row of rows) {
     const input = row.querySelector(".filename-input");
     if (input.dataset.isDefault === "true") {
       const ext = input.value.match(/\.[a-zA-Z0-9]+$/)?.[0] ?? "";
-      // Strip the title's boilerplate suffix first, then sanitize, then cap the length.
-      const cleaned = sanitizeForFilename(cleanTitleForFilename(pageTitle) || pageTitle);
-      const base = truncateFilenameBase(cleaned, suggestedFilenameMaxLength) || "download";
       input.value = `${base}${ext}`;
       input.dataset.isDefault = "true"; // still a default, just an updated one
     }
@@ -200,6 +210,7 @@ detectForm.addEventListener("submit", async (event) => {
   detectButton.disabled = true;
   candidatesList.innerHTML = "";
   candidatesSection.hidden = true;
+  currentPageTitle = null;
   setDetectStatus("偵測中…（最多需要幾秒鐘）", false);
 
   try {
@@ -217,9 +228,15 @@ detectForm.addEventListener("submit", async (event) => {
     source.addEventListener("candidate", (e) => {
       renderCandidate(JSON.parse(e.data));
     });
+    source.addEventListener("pageTitle", (e) => {
+      currentPageTitle = JSON.parse(e.data).pageTitle;
+      backfillDefaultFilenames(currentPageTitle);
+    });
     source.addEventListener("done", (e) => {
       const data = JSON.parse(e.data);
-      backfillDefaultFilenames(data.pageTitle || "");
+      // The final title is authoritative; it usually matches the last "pageTitle" event.
+      currentPageTitle = data.pageTitle || currentPageTitle || "";
+      backfillDefaultFilenames(currentPageTitle);
       applyThumbnails(id);
       const count = candidatesList.children.length;
       setDetectStatus(count > 0 ? `偵測完成，找到 ${count} 個項目` : "偵測完成，沒有找到可下載的項目", count === 0);

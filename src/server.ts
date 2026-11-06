@@ -52,7 +52,7 @@ async function main() {
     settingsStore,
     cacheDir: CACHE_DIR,
     downloadsDir: DOWNLOADS_DIR,
-    runDetection: (pageUrl, onCandidate) => runDetectionSession(pageUrl, { onCandidate }),
+    runDetection: (pageUrl, onCandidate, onPageTitle) => runDetectionSession(pageUrl, { onCandidate, onPageTitle }),
     resolveSegments,
     downloadToFile,
     relocateFile,
